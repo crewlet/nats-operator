@@ -1,4 +1,4 @@
-# nats-operator
+# NATS Operator
 
 A Kubernetes operator for running [NATS](https://nats.io) clusters and the
 nats-box utility pod, modelled on the upstream
