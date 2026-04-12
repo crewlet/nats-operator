@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Go modules dependencies
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+
+  # GitHub Actions dependencies
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+
+  # Docker dependencies (for the manager Dockerfile)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+
+  # Helm chart dependencies (the operator chart)
+  - package-ecosystem: "helm"
+    directory: "/charts/nats-operator"
+    schedule:
+      interval: "monthly"

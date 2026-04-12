@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CHART_FILE: charts/nats-operator/Chart.yaml
+
+jobs:
+  bump-helm-version:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: helm-version-bump
+      cancel-in-progress: false
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if bump is needed
+        id: guard
+        run: |
+          SKIP=false
+
+          # Skip if tag commit is not on the default branch
+          if ! git merge-base --is-ancestor ${{ github.sha }} HEAD; then
+            echo "Tag commit is not on ${{ github.event.repository.default_branch }}, skipping bump"
+            SKIP=true
+          fi
+
+          # Skip if appVersion already matches the tag
+          CURRENT_APP_VERSION=$(grep '^appVersion:' "${CHART_FILE}" | awk '{print $2}' | tr -d '"')
+          if [ "$CURRENT_APP_VERSION" = "${{ steps.version.outputs.tag }}" ]; then
+            echo "appVersion is already $CURRENT_APP_VERSION, skipping bump"
+            SKIP=true
+          fi
+
+          echo "skip=${SKIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Bump Helm chart version and appVersion
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          # Read current chart version and bump patch
+          CURRENT=$(grep '^version:' "${CHART_FILE}" | awk '{print $2}')
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          sed -i "s/^version: .*/version: ${NEW_VERSION}/" "${CHART_FILE}"
+          sed -i "s/^appVersion: .*/appVersion: \"${{ steps.version.outputs.tag }}\"/" "${CHART_FILE}"
+          echo "Updated ${CHART_FILE}:"
+          git diff "${CHART_FILE}"
+
+      - name: Create pull request
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="chore/bump-helm-${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add "${CHART_FILE}"
+          git commit -m "chore: bump Helm chart to ${{ steps.version.outputs.tag }}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore: bump Helm chart to ${{ steps.version.outputs.tag }}" \
+            --body "Automated Helm chart version bump for release ${{ steps.version.outputs.tag }}." \
+            --base "${{ github.event.repository.default_branch }}"
+
+      - name: Approve pull request
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_APPROVE_TOKEN }}
+        run: |
+          gh pr review "chore/bump-helm-${{ steps.version.outputs.tag }}" --approve
+
+      - name: Enable auto-merge
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "chore/bump-helm-${{ steps.version.outputs.tag }}" --auto --squash

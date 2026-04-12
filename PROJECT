@@ -6,6 +6,8 @@ cliVersion: 4.13.1
 domain: crewlet.cloud
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  autoupdate.kubebuilder.io/v1-alpha: {}
 projectName: nats-operator
 repo: github.com/crewlet/nats-operator
 resources:

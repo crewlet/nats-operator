@@ -1,0 +1,77 @@
+name: Publish Helm Chart
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "charts/nats-operator/Chart.yaml"
+      - ".github/workflows/helm.yml"
+
+env:
+  REGISTRY: ghcr.io
+  CHART_DIR: charts/nats-operator
+  CHART_NAME: nats-operator
+
+jobs:
+  publish-helm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2 # Needed for git diff against the previous commit
+
+      - name: Check if Chart.yaml version changed
+        id: check-version
+        run: |
+          if git diff HEAD^ HEAD -- "${CHART_DIR}/Chart.yaml" | grep -E '^\+version:'; then
+            echo "version_changed=true" >> "$GITHUB_OUTPUT"
+            VERSION=$(grep '^version:' "${CHART_DIR}/Chart.yaml" | awk '{print $2}')
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "version_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Helm
+        if: steps.check-version.outputs.version_changed == 'true'
+        uses: azure/setup-helm@v5
+
+      - name: Setup Go
+        if: steps.check-version.outputs.version_changed == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Sync chart from config/
+        if: steps.check-version.outputs.version_changed == 'true'
+        run: make helm-sync
+
+      - name: Log in to Container Registry
+        if: steps.check-version.outputs.version_changed == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate chart
+        if: steps.check-version.outputs.version_changed == 'true'
+        run: |
+          helm lint "${CHART_DIR}"
+
+      - name: Package and push Helm chart
+        if: steps.check-version.outputs.version_changed == 'true'
+        run: |
+          VERSION="${{ steps.check-version.outputs.version }}"
+
+          echo "Packaging chart with version: $VERSION"
+          helm package "${CHART_DIR}" --version "$VERSION"
+
+          CHART_PACKAGE="${CHART_NAME}-${VERSION}.tgz"
+          CHART_REGISTRY="${REGISTRY}/${{ github.repository }}/charts"
+
+          echo "Pushing chart package: $CHART_PACKAGE to $CHART_REGISTRY"
+          helm push "$CHART_PACKAGE" "oci://$CHART_REGISTRY"
