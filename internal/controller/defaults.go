@@ -23,6 +23,7 @@ const (
 	defaultNatsImage     = "nats:2.12.6-alpine"
 	defaultReloaderImage = "natsio/nats-server-config-reloader:0.21.1"
 	defaultExporterImage = "natsio/prometheus-nats-exporter:0.18.0"
+	defaultNatsBoxImage  = "natsio/nats-box:0.19.3"
 )
 
 // Default listener ports — match the upstream nats-io/k8s helm chart.
