@@ -1,0 +1,171 @@
+# Default values for nats-operator.
+
+# -- Number of operator replicas. The operator uses leader election so
+# multiple replicas provide HA without duplicate reconciles.
+replicaCount: 1
+
+image:
+  # -- Operator image repository (full path including registry).
+  repository: ghcr.io/crewlet/nats-operator
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Operator image tag. Defaults to the chart appVersion.
+  tag: ""
+  # -- Operator image digest. When set, overrides tag for reproducible installs.
+  digest: ""
+
+# -- Image pull secrets used by the operator pod.
+imagePullSecrets: []
+# -- Override the chart name (defaults to "nats-operator").
+nameOverride: ""
+# -- Override the fully-qualified release name.
+fullnameOverride: ""
+# -- Override the namespace the chart installs into. Defaults to .Release.Namespace.
+namespaceOverride: ""
+
+# -- Labels applied to every resource the chart renders.
+commonLabels: {}
+
+# -- CRD installation. Helm installs CRDs from `charts/nats-operator/crds/`
+# at install time but does not upgrade them on `helm upgrade`. Disable this
+# block when CRDs are managed out-of-band (GitOps, separate CRD chart, ...).
+crds:
+  # -- Whether the chart should bundle the CRDs at install time.
+  install: true
+
+serviceAccount:
+  # -- Whether to create a ServiceAccount for the operator.
+  create: true
+  # -- Automount the SA token. Operators that use it via controller-runtime
+  # need it mounted; only set false if you have a specific reason.
+  automount: true
+  # -- Annotations added to the ServiceAccount (e.g. for IRSA / Workload Identity).
+  annotations: {}
+  # -- Override the generated ServiceAccount name.
+  name: ""
+
+# -- Annotations added to the operator pod template. The default makes
+# `kubectl logs` / `kubectl exec` target the manager container without -c.
+podAnnotations:
+  kubectl.kubernetes.io/default-container: manager
+
+# -- Labels added to the operator pod template.
+podLabels: {}
+
+# -- Pod-level security context.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context for the manager container.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Resource requests / limits for the manager container.
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Manager liveness probe (full corev1.Probe shape).
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8081
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+# -- Manager readiness probe.
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8081
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# -- Extra volumes attached to the manager pod.
+volumes: []
+# -- Extra volume mounts on the manager container.
+volumeMounts: []
+
+# -- Pod nodeSelector.
+nodeSelector: {}
+# -- Pod tolerations.
+tolerations: []
+# -- Pod affinity rules.
+affinity: {}
+# -- Pod topologySpreadConstraints (the chart fills in the labelSelector).
+topologySpreadConstraints: []
+# -- Pod priorityClassName.
+priorityClassName: ""
+# -- Pod runtimeClassName.
+runtimeClassName: ""
+# -- Termination grace period seconds.
+terminationGracePeriodSeconds: 10
+
+# -- Leader election. Required when running multiple replicas.
+leaderElection:
+  enabled: true
+
+# -- Manager health probe bind address (passed via --health-probe-bind-address).
+healthProbeBindAddress: ":8081"
+
+metrics:
+  # -- Whether the manager exposes a metrics endpoint.
+  enabled: true
+  # -- Bind address passed via --metrics-bind-address.
+  bindAddress: ":8443"
+  # -- Container port the manager listens on for metrics.
+  port: 8443
+  # -- Whether to serve metrics over HTTPS.
+  secure: true
+  service:
+    # -- Whether to create a Service in front of the metrics port.
+    create: true
+    # -- Service type for the metrics endpoint.
+    type: ClusterIP
+    # -- Annotations on the metrics Service.
+    annotations: {}
+  serviceMonitor:
+    # -- Create a prometheus-operator ServiceMonitor for the metrics endpoint.
+    enabled: false
+    # -- Additional labels added to the generated ServiceMonitor (commonly used
+    # to bind it to a specific Prometheus instance via release labels).
+    labels: {}
+    # -- Prometheus scrape interval.
+    interval: 30s
+    # -- Prometheus scrape timeout.
+    scrapeTimeout: 10s
+
+rbac:
+  # -- Whether to create the operator's ClusterRole / RoleBindings.
+  create: true
+
+# -- Manager command-line arguments. The chart appends --leader-elect,
+# --health-probe-bind-address and --metrics-bind-address based on the values
+# above; entries here are appended verbatim and override duplicates.
+extraArgs: []
+
+# -- Optional PodDisruptionBudget for the operator pod itself.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1   # set instead of minAvailable; the two are mutually exclusive
+
+# -- Optional NetworkPolicy restricting traffic to/from the operator pod.
+networkPolicy:
+  enabled: false
+  # -- Additional ingress rules merged into the rendered NetworkPolicy.
+  # By default the chart only allows the metrics port from any namespace.
+  extraIngress: []
+  # -- Additional egress rules merged into the rendered NetworkPolicy.
+  # By default egress is unrestricted.
+  extraEgress: []

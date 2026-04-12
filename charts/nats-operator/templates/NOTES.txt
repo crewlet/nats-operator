@@ -1,0 +1,35 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} has been installed.
+
+The operator manages NatsCluster and NatsBox resources in any namespace.
+
+To verify the operator is running:
+
+  kubectl -n {{ include "nats-operator.namespace" . }} get deploy {{ include "nats-operator.fullname" . }}-controller-manager
+
+To create your first NatsCluster:
+
+  cat <<EOF | kubectl apply -f -
+  apiVersion: nats.crewlet.cloud/v1alpha1
+  kind: NatsCluster
+  metadata:
+    name: my-nats
+  spec:
+    replicas: 3
+    image:
+      repository: nats
+      tag: 2.12.6-alpine
+    config:
+      jetstream:
+        enabled: true
+        fileStore:
+          pvc:
+            resources:
+              requests:
+                storage: 10Gi
+  EOF
+
+Then watch it come up:
+
+  kubectl get natscluster my-nats -w
+
+For more examples see: https://github.com/crewlet/nats-operator

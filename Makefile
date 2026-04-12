@@ -171,6 +171,55 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+##@ Helm
+
+HELM_CHART_DIR ?= charts/nats-operator
+
+.PHONY: helm-sync-crds
+helm-sync-crds: manifests ## Sync generated CRDs into the helm chart's crds/ directory.
+	@mkdir -p "$(HELM_CHART_DIR)/crds"
+	@rm -f "$(HELM_CHART_DIR)/crds"/*.yaml
+	@cp config/crd/bases/*.yaml "$(HELM_CHART_DIR)/crds/"
+	@echo "Synced CRDs into $(HELM_CHART_DIR)/crds"
+
+.PHONY: helm-sync-rbac
+helm-sync-rbac: manifests ## Sync the manager ClusterRole into the helm chart's templates/rbac directory.
+	@mkdir -p "$(HELM_CHART_DIR)/templates/rbac"
+	@awk ' \
+		BEGIN { print "{{- if .Values.rbac.create }}" } \
+		/^---$$/ { next } \
+		/^  name: manager-role$$/ { \
+			print "  name: {{ include \"nats-operator.fullname\" . }}-manager-role"; \
+			print "  labels:"; \
+			print "    {{- include \"nats-operator.labels\" . | nindent 4 }}"; \
+			next \
+		} \
+		{ print } \
+		END { print "{{- end }}" } \
+	' config/rbac/role.yaml > "$(HELM_CHART_DIR)/templates/rbac/manager-role.yaml"
+	@echo "Synced manager-role into $(HELM_CHART_DIR)/templates/rbac/manager-role.yaml"
+
+.PHONY: helm-sync
+helm-sync: helm-sync-crds helm-sync-rbac ## Sync CRDs and manager ClusterRole into the helm chart.
+
+.PHONY: helm-lint
+helm-lint: helm-sync ## Run helm lint against the chart.
+	helm lint "$(HELM_CHART_DIR)"
+
+.PHONY: helm-template
+helm-template: helm-sync ## Run helm template with default values to catch template errors.
+	helm template nats-operator "$(HELM_CHART_DIR)" > /dev/null
+	helm template nats-operator "$(HELM_CHART_DIR)" \
+		--set podDisruptionBudget.enabled=true \
+		--set networkPolicy.enabled=true \
+		--set metrics.serviceMonitor.enabled=true > /dev/null
+	@echo "helm template smoke tests passed"
+
+.PHONY: helm-package
+helm-package: helm-sync helm-lint ## Package the chart into a .tgz under dist/.
+	@mkdir -p dist
+	helm package "$(HELM_CHART_DIR)" --destination dist
+
 ##@ Dependencies
 
 ## Location to install dependencies to
