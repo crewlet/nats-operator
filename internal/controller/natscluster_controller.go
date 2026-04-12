@@ -141,6 +141,7 @@ func (r *NatsClusterReconciler) updateStatus(ctx context.Context, cr *natsv1alph
 	cr.Status.Replicas = sts.Status.Replicas
 	cr.Status.ReadyReplicas = sts.Status.ReadyReplicas
 	cr.Status.ConfigMapName = configMapName(cr)
+	cr.Status.Endpoints = clusterEndpoints(cr, spec)
 	setConditions(cr, sts, desired)
 
 	return r.Status().Update(ctx, cr)

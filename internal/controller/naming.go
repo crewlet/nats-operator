@@ -121,3 +121,21 @@ func podFQDN(cr *natsv1alpha1.NatsCluster, ordinal int32, useFQDN bool, clusterD
 	}
 	return short
 }
+
+// clusterEndpoints returns the canonical connection URLs the operator
+// publishes in NatsCluster.Status.Endpoints. NACK wrapper CRs and external
+// clients consume these instead of guessing the Service name pattern.
+func clusterEndpoints(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec) natsv1alpha1.NatsClusterEndpoints {
+	port := spec.Config.Nats.Port
+	scheme := "nats"
+	if spec.Config.Nats.TLS.Enabled {
+		scheme = "tls"
+	}
+	out := natsv1alpha1.NatsClusterEndpoints{
+		Headless: fmt.Sprintf("%s://%s.%s.svc:%d", scheme, headlessServiceName(cr), cr.Namespace, port),
+	}
+	if isTrue(spec.Service.Enabled) {
+		out.Client = fmt.Sprintf("%s://%s.%s.svc:%d", scheme, clientServiceName(cr), cr.Namespace, port)
+	}
+	return out
+}

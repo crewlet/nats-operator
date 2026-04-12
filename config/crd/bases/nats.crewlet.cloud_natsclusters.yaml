@@ -4726,6 +4726,21 @@ spec:
               configMapName:
                 description: configMapName is the ConfigMap currently mounted as /etc/nats-config.
                 type: string
+              endpoints:
+                description: |-
+                  endpoints exposes the canonical connection URLs the operator generates
+                  for this NatsCluster. NACK wrapper CRs and external clients use these
+                  instead of guessing the Service name pattern.
+                properties:
+                  client:
+                    description: client is the URL of the client-facing Service.
+                    type: string
+                  headless:
+                    description: |-
+                      headless is the URL of the headless Service used for pod DNS / cluster
+                      routing. Useful when callers need to bypass the client Service.
+                    type: string
+                type: object
               observedGeneration:
                 description: observedGeneration is the .metadata.generation last reconciled.
                 format: int64

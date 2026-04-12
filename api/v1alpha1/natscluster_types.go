@@ -683,6 +683,19 @@ type ServiceAccountSpec struct {
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
+// NatsClusterEndpoints exposes the canonical connection URLs the operator
+// generates for a NatsCluster. Consumers (NACK wrapper CRs, external apps)
+// read these instead of reconstructing them from the Service name pattern.
+type NatsClusterEndpoints struct {
+	// client is the URL of the client-facing Service.
+	// +optional
+	Client string `json:"client,omitempty"`
+	// headless is the URL of the headless Service used for pod DNS / cluster
+	// routing. Useful when callers need to bypass the client Service.
+	// +optional
+	Headless string `json:"headless,omitempty"`
+}
+
 // NatsClusterStatus defines the observed state of NatsCluster.
 type NatsClusterStatus struct {
 	// observedGeneration is the .metadata.generation last reconciled.
@@ -700,6 +713,12 @@ type NatsClusterStatus struct {
 	// configMapName is the ConfigMap currently mounted as /etc/nats-config.
 	// +optional
 	ConfigMapName string `json:"configMapName,omitempty"`
+
+	// endpoints exposes the canonical connection URLs the operator generates
+	// for this NatsCluster. NACK wrapper CRs and external clients use these
+	// instead of guessing the Service name pattern.
+	// +optional
+	Endpoints NatsClusterEndpoints `json:"endpoints,omitzero"`
 
 	// conditions represent the current state of the NatsCluster resource.
 	//
