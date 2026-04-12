@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- nats_v1alpha1_natscluster.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
