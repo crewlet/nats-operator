@@ -109,14 +109,21 @@ func renderNatsConf(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsCluster
 		root["gateway"] = renderGateway(cr, spec.Config.Gateway, spec.TLSCA)
 	}
 
-	if spec.Config.Resolver.Enabled {
-		root["resolver"] = renderResolver()
+	// When the typed JWT auth path is active, emit an include directive
+	// pointing at the operator-managed auth Secret (mounted at
+	// /etc/nats-auth). The Secret contains the rendered auth.conf
+	// fragment which sets `operator:`, `system_account:`, `resolver:`
+	// and pulls in resolver_preload.conf. Keeping the JWT material out
+	// of the ConfigMap — only an include reference lands in nats.conf.
+	if spec.Auth.JWT != nil {
+		root[includeKeyPrefix+"000auth"] = mountPathAuth + "/" + authFileName
 	}
 
-	// Includes are rendered last so user-supplied snippets can override
-	// values produced from the typed spec.
+	// Config.Includes are rendered last so user-supplied snippets can
+	// override values produced from the typed spec. The key prefix
+	// sorting ensures they come after the auth include above.
 	for i, inc := range spec.Config.Includes {
-		key := fmt.Sprintf("%s%03d", includeKeyPrefix, i)
+		key := fmt.Sprintf("%s%03d-%s", includeKeyPrefix, i+1, inc.Name)
 		root[key] = includeMountPath(inc.Name)
 	}
 
@@ -262,15 +269,6 @@ func renderGateway(cr *natsv1alpha1.NatsCluster, g natsv1alpha1.ListenerConfig, 
 		out["tls"] = renderTLS(g.TLS, "gateway", ca)
 	}
 	return out
-}
-
-func renderResolver() confBlock {
-	return confBlock{
-		"type":         "full",
-		"dir":          mountPathResolver,
-		"allow_delete": false,
-		"interval":     confRaw("\"2m\""),
-	}
 }
 
 // ----- serializer -----

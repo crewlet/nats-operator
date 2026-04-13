@@ -28,6 +28,7 @@ const (
 	suffixSA       = "-sa"
 	suffixPodMon   = "-podmonitor"
 	suffixIngress  = "-ws-ingress"
+	suffixAuth     = "-auth"
 )
 
 // Container mount paths. The operator owns these — users do not configure
@@ -38,12 +39,18 @@ const (
 	mountPathConfig    = "/etc/nats-config"
 	mountPathExtra     = "/etc/nats-extra"
 	mountPathCA        = "/etc/nats-ca-cert"
+	mountPathAuth      = "/etc/nats-auth"
 	mountPathTLSPrefix = "/etc/nats-certs/" // suffixed with the listener name
 	mountPathData      = "/data"
 	mountPathResolver  = "/data/resolver"
 
 	// natsConfFileName is the file name inside the config ConfigMap.
 	natsConfFileName = "nats.conf"
+
+	// Keys in the operator-managed auth Secret.
+	authFileName            = "auth.conf"
+	authOperatorJWTFileName = "operator.jwt"
+	authResolverPreloadName = "resolver_preload.conf"
 
 	// pvcVolumeNameJetStream is the volume claim template name for the
 	// jetstream file store. The PVC name K8s actually creates is
@@ -57,6 +64,7 @@ const (
 	volumeNameConfig = "config"
 	volumeNameExtra  = "extra-config"
 	volumeNameCA     = "ca-cert"
+	volumeNameAuth   = "auth"
 )
 
 // configMapName returns the ConfigMap name the operator uses for the
@@ -96,6 +104,19 @@ func podMonitorName(cr *natsv1alpha1.NatsCluster) string {
 
 func ingressName(cr *natsv1alpha1.NatsCluster) string {
 	return cr.Name + suffixIngress
+}
+
+// authSecretName is the operator-managed Secret holding the rendered
+// auth.conf, the mounted operator JWT, and the resolver_preload fragment.
+// Mounted at /etc/nats-auth in the nats container.
+func authSecretName(cr *natsv1alpha1.NatsCluster) string {
+	return cr.Name + suffixAuth
+}
+
+// nackAccountName is the NACK Account CR name the operator creates for a
+// given JWT account entry with userCreds set.
+func nackAccountName(cr *natsv1alpha1.NatsCluster, accountName string) string {
+	return cr.Name + "-" + accountName
 }
 
 // tlsMountPath returns the mount path for the named listener's TLS secret

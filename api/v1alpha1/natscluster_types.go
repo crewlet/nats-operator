@@ -104,6 +104,11 @@ type NatsClusterSpec struct {
 	// serviceAccount customizes the ServiceAccount used by the StatefulSet pods.
 	// +optional
 	ServiceAccount ServiceAccountSpec `json:"serviceAccount,omitzero"`
+
+	// auth configures the cluster's authentication. When unset, the cluster
+	// runs without authentication (only suitable for fully-isolated workloads).
+	// +optional
+	Auth AuthSpec `json:"auth,omitzero"`
 }
 
 // GlobalSpec mirrors `global` from the upstream chart.
@@ -158,8 +163,6 @@ type NatsConfigSpec struct {
 	Monitor MonitorConfig `json:"monitor,omitzero"`
 	// +optional
 	Profiling SimpleListenerConfig `json:"profiling,omitzero"`
-	// +optional
-	Resolver ResolverConfig `json:"resolver,omitzero"`
 
 	// serverNamePrefix is prepended to each pod's server name. Helpful for
 	// keeping server names unique across a super-cluster.
@@ -374,16 +377,6 @@ type MonitorConfig struct {
 	// CN/SAN of the nats TLS certificate.
 	// +optional
 	TLSEnabled bool `json:"tlsEnabled,omitempty"`
-}
-
-// ResolverConfig mirrors `config.resolver`. The on-disk path is fixed at
-// /data/resolver and not user-configurable. Free-form `resolver_preload` and
-// similar blocks belong in Config.Includes.
-type ResolverConfig struct {
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-	// +optional
-	PVC PVCConfig `json:"pvc,omitzero"`
 }
 
 // TLSBlock is the standard tls config block reused throughout the listener
@@ -667,6 +660,137 @@ type PodDisruptionBudgetSpec struct {
 	// field is overwritten by the operator and any user-supplied value is ignored.
 	// +optional
 	policyv1.PodDisruptionBudgetSpec `json:",inline"`
+}
+
+// AuthSpec configures how clients authenticate to the NATS cluster.
+// In v1alpha1 only the JWT (decentralized) path is modeled — other auth
+// modes (token, user/password, NKey) can be added later as peer fields.
+type AuthSpec struct {
+	// jwt enables NATS decentralized authentication. When set, the operator
+	// renders the `operator:`, `system_account:`, `resolver:` and
+	// `resolver_preload:` directives into nats.conf from the typed fields
+	// below, so users do not have to hand-write them into a Secret and
+	// reference them via Config.Includes.
+	// +optional
+	JWT *JWTAuthSpec `json:"jwt,omitempty"`
+}
+
+// JWTAuthSpec describes the decentralized auth tree the server trusts.
+// The operator mounts the referenced operator JWT and account JWTs into
+// the nats container via a managed Secret and emits an `include` directive
+// in nats.conf pointing at the rendered auth fragment.
+// +kubebuilder:validation:XValidation:rule="self.accounts.exists(a, a.publicKey == self.systemAccount)",message="systemAccount must match one of accounts[].publicKey"
+type JWTAuthSpec struct {
+	// operator references a Secret key containing the operator JWT — the
+	// root of trust for this cluster. Typically generated with `nsc` and
+	// rotated out-of-band. Required.
+	// +required
+	Operator corev1.SecretKeySelector `json:"operator"`
+
+	// systemAccount is the public key of the account with cluster-admin
+	// privileges. Must match one of accounts[].publicKey. NATS account
+	// public keys are 56-char base32 strings, so 64 is a comfortable cap
+	// that also keeps the CEL cross-check rule's estimated cost bounded.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +required
+	SystemAccount string `json:"systemAccount"`
+
+	// accounts is the set of preloaded accounts. Each entry supplies the
+	// account's public key, a reference to a Secret containing the signed
+	// account JWT, and (optionally) a reference to a user creds Secret
+	// that the operator uses to create a NACK `jetstream.nats.io/v1beta2`
+	// Account CR for this account.
+	//
+	// MaxItems caps the list at 64 because apiserver CEL rule cost is
+	// estimated quadratically against unbounded lists and the
+	// systemAccount cross-check rule below otherwise exceeds the budget.
+	// 64 is well above any realistic number of preloaded accounts — the
+	// full resolver mode is the right answer once you have more.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +required
+	Accounts []JWTAccount `json:"accounts"`
+
+	// resolver configures how nats-server stores and looks up account JWTs
+	// at runtime.
+	// +optional
+	Resolver JWTResolverSpec `json:"resolver,omitzero"`
+}
+
+// JWTAccount is a single preloaded account entry.
+type JWTAccount struct {
+	// name is a human-readable handle for this account. Used as the NACK
+	// Account CR name suffix (`<natscluster-name>-<name>`). Must be a
+	// DNS label.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// publicKey is the account's public key (`nsc` account identifier).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	PublicKey string `json:"publicKey"`
+
+	// jwt references a Secret key containing the account JWT signed by the
+	// operator. Required.
+	// +required
+	JWT corev1.SecretKeySelector `json:"jwt"`
+
+	// userCreds, when set, tells the operator to create a NACK
+	// `jetstream.nats.io/v1beta2` Account CR for this account pointing at
+	// the referenced user credentials Secret. That Account CR can then be
+	// referenced by NACK Stream / Consumer / KV / ObjectStore CRs via
+	// their `account: <natscluster-name>-<name>` field, so users do not
+	// have to repeat URLs or credentials on every JetStream resource.
+	//
+	// The operator does not generate the user creds — they come from
+	// `nsc generate creds` and live in a user-managed Secret.
+	// +optional
+	UserCreds *corev1.SecretKeySelector `json:"userCreds,omitempty"`
+}
+
+// JWTResolverType selects how nats-server stores account JWTs at runtime.
+// +kubebuilder:validation:Enum=memory;full
+type JWTResolverType string
+
+const (
+	// JWTResolverMemory serves only the preloaded accounts. Accounts are
+	// static for the lifetime of each pod — changes require a config
+	// rewrite (which the operator handles on NatsCluster edits).
+	JWTResolverMemory JWTResolverType = "memory"
+
+	// JWTResolverFull backs accounts with on-disk storage and allows the
+	// system account to push new/updated accounts at runtime without a
+	// config rewrite. Requires a PVC template via `storage`.
+	JWTResolverFull JWTResolverType = "full"
+)
+
+// JWTResolverSpec configures the runtime resolver behavior.
+// +kubebuilder:validation:XValidation:rule="self.type != 'full' || has(self.storage)",message="storage is required when resolver.type is 'full'"
+type JWTResolverSpec struct {
+	// type selects the resolver mode. Defaults to "memory".
+	// +kubebuilder:default=memory
+	// +optional
+	Type JWTResolverType `json:"type,omitempty"`
+
+	// storage is the PVC template used when type=full. The operator
+	// mounts the volume at /data/resolver. Ignored for type=memory.
+	// +optional
+	Storage *corev1.PersistentVolumeClaimSpec `json:"storage,omitempty"`
+
+	// allowDelete enables runtime account deletion via the system account.
+	// Only honored when type=full. Defaults to false.
+	// +optional
+	AllowDelete *bool `json:"allowDelete,omitempty"`
+
+	// interval is how often a `full` resolver checks for account updates.
+	// Parseable by NATS server (e.g. "2m"). Only honored when type=full.
+	// +optional
+	Interval string `json:"interval,omitempty"`
 }
 
 // ServiceAccountSpec describes the generated ServiceAccount.

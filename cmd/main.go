@@ -35,6 +35,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	jsv1beta2 "github.com/nats-io/nack/pkg/jetstream/apis/jetstream/v1beta2"
+
 	natsv1alpha1 "github.com/crewlet/nats-operator/api/v1alpha1"
 	"github.com/crewlet/nats-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
@@ -49,6 +51,11 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(natsv1alpha1.AddToScheme(scheme))
+	// Register NACK's jetstream.nats.io types so the NatsCluster reconciler
+	// can create NACK Account CRs for accounts with userCreds set. NACK
+	// itself is a peer operator — we only construct its CRs, we don't
+	// manage its CRDs.
+	utilruntime.Must(jsv1beta2.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 

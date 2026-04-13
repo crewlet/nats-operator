@@ -19,18 +19,22 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	jsv1beta2 "github.com/nats-io/nack/pkg/jetstream/apis/jetstream/v1beta2"
 
 	natsv1alpha1 "github.com/crewlet/nats-operator/api/v1alpha1"
 )
@@ -51,16 +55,18 @@ type NatsClusterReconciler struct {
 // +kubebuilder:rbac:groups=nats.crewlet.cloud,resources=natsclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=podmonitors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=jetstream.nats.io,resources=accounts,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is the main reconcile loop. It fetches the NatsCluster, applies
 // controller-side defaults, builds every owned resource from the defaulted
 // spec, and server-side-applies them. Status is then patched from the live
 // StatefulSet's replica counts.
 func (r *NatsClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
 	cr := &natsv1alpha1.NatsCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cr); err != nil {
@@ -71,6 +77,14 @@ func (r *NatsClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	spec := defaulted(&cr.Spec)
+
+	// Resolve the JWT auth material — operator JWT and account JWTs — up
+	// front so the auth Secret builder stays pure. If any referenced user
+	// Secret is missing we surface a status condition and requeue.
+	material, err := r.resolveJWTMaterial(ctx, cr, &spec)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Render nats.conf once and share the bytes between the ConfigMap
 	// builder and the StatefulSet builder (which stamps a checksum
@@ -83,6 +97,9 @@ func (r *NatsClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	objects := []client.Object{}
 	if cm := buildConfigMap(cr, rendered); cm != nil {
 		objects = append(objects, cm)
+	}
+	if authSecret := buildAuthSecret(cr, &spec, material); authSecret != nil {
+		objects = append(objects, authSecret)
 	}
 	objects = append(objects, buildHeadlessService(cr, &spec))
 	if svc := buildClientService(cr, &spec); svc != nil {
@@ -115,11 +132,117 @@ func (r *NatsClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 	}
 
+	// NACK integration. We SSA one NACK Account CR per jwt.accounts[]
+	// entry that has userCreds set. The NACK CRD may not be installed in
+	// the cluster — in that case we degrade gracefully: stamp a status
+	// condition, requeue with backoff, keep the rest of the NatsCluster
+	// healthy.
+	requeue, nackErr := r.applyNackAccounts(ctx, cr, &spec, log)
+	if nackErr != nil {
+		return ctrl.Result{}, nackErr
+	}
+
 	if err := r.updateStatus(ctx, cr, &spec); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	if requeue > 0 {
+		return ctrl.Result{RequeueAfter: requeue}, nil
+	}
 	return ctrl.Result{}, nil
+}
+
+// resolveJWTMaterial fetches the raw operator JWT and per-account JWT bytes
+// from the Secrets the user referenced in spec.auth.jwt. Returns nil when
+// the JWT path is not configured. Returns an error on any Secret that is
+// missing or missing the referenced key — the reconciler surfaces this as
+// a failed reconcile, which in turn retries via the standard backoff.
+func (r *NatsClusterReconciler) resolveJWTMaterial(ctx context.Context, cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec) (*jwtMaterial, error) {
+	if spec.Auth.JWT == nil {
+		return nil, nil
+	}
+	jwt := spec.Auth.JWT
+
+	operatorJWT, err := r.readSecretKey(ctx, cr.Namespace, jwt.Operator)
+	if err != nil {
+		return nil, fmt.Errorf("reading operator JWT from secret %q: %w", jwt.Operator.Name, err)
+	}
+
+	accountJWTs := make(map[string][]byte, len(jwt.Accounts))
+	for _, account := range jwt.Accounts {
+		body, err := r.readSecretKey(ctx, cr.Namespace, account.JWT)
+		if err != nil {
+			return nil, fmt.Errorf("reading account %q JWT from secret %q: %w", account.Name, account.JWT.Name, err)
+		}
+		accountJWTs[account.Name] = body
+	}
+	return &jwtMaterial{operatorJWT: operatorJWT, accountJWTs: accountJWTs}, nil
+}
+
+// readSecretKey is a small helper that fetches a Secret and returns the
+// bytes at the given key, or a descriptive error.
+func (r *NatsClusterReconciler) readSecretKey(ctx context.Context, namespace string, ref corev1.SecretKeySelector) ([]byte, error) {
+	s := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: ref.Name}, s); err != nil {
+		return nil, err
+	}
+	body, ok := s.Data[ref.Key]
+	if !ok || len(body) == 0 {
+		return nil, fmt.Errorf("secret %q has no data under key %q", ref.Name, ref.Key)
+	}
+	return body, nil
+}
+
+// applyNackAccounts SSA-applies one NACK Account CR per jwt.accounts[]
+// entry with userCreds set. Returns a non-zero RequeueAfter when the NACK
+// CRD is not installed in the cluster, so the operator retries later
+// without the user having to edit the NatsCluster.
+func (r *NatsClusterReconciler) applyNackAccounts(ctx context.Context, cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec, log interface {
+	Info(msg string, keysAndValues ...any)
+}) (time.Duration, error) {
+	accounts := buildNackAccounts(cr, spec)
+	if len(accounts) == 0 {
+		// No NACK integration requested — clear any stale condition.
+		r.setNackCondition(cr, metav1.ConditionTrue, "NotRequested", "no accounts opted in to NACK integration")
+		return 0, nil
+	}
+
+	for _, account := range accounts {
+		if err := controllerutil.SetControllerReference(cr, account, r.Scheme); err != nil {
+			return 0, fmt.Errorf("setting owner reference on NACK Account %s: %w", account.Name, err)
+		}
+		//nolint:staticcheck // SA1019 — see note on client.Apply above.
+		if err := r.Patch(ctx, account, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+			if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
+				// NACK CRD not installed. Surface a condition and retry
+				// later — the operator will pick up the integration once
+				// NACK is installed, without the user touching anything.
+				r.setNackCondition(cr, metav1.ConditionFalse, "NackCRDNotInstalled",
+					"jetstream.nats.io/v1beta2 Account CRD is not installed; install NACK to enable automated account wiring")
+				log.Info("NACK CRD not installed, deferring NACK integration", "account", account.Name)
+				return 60 * time.Second, nil
+			}
+			return 0, fmt.Errorf("server-side applying NACK Account %s: %w", account.Name, err)
+		}
+	}
+
+	r.setNackCondition(cr, metav1.ConditionTrue, "Applied",
+		fmt.Sprintf("%d NACK Account CR(s) in sync", len(accounts)))
+	return 0, nil
+}
+
+// setNackCondition stamps the NackIntegrationAvailable condition on the
+// cluster's status. updateStatus is responsible for actually pushing the
+// status subresource — this helper only mutates the in-memory CR.
+func (r *NatsClusterReconciler) setNackCondition(cr *natsv1alpha1.NatsCluster, status metav1.ConditionStatus, reason, message string) {
+	cr.Status.Conditions = upsertCondition(cr.Status.Conditions, metav1.Condition{
+		Type:               "NackIntegrationAvailable",
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: cr.Generation,
+	})
 }
 
 // updateStatus reads the live StatefulSet and patches the NatsCluster's
@@ -209,15 +332,27 @@ func upsertCondition(in []metav1.Condition, c metav1.Condition) []metav1.Conditi
 // owned resource types so changes to them trigger reconciles for the
 // parent NatsCluster. PodMonitor is intentionally not in the Owns list —
 // the operator owns it via SSA but doesn't need to react to its events.
+// NACK Account ownership is installed conditionally at runtime: if the
+// CRD isn't present when the manager starts, Owns() would panic, so
+// integration is gated by runtime checks in applyNackAccounts instead.
 func (r *NatsClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&natsv1alpha1.NatsCluster{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&networkingv1.Ingress{}).
-		Named("natscluster").
-		Complete(r)
+		Named("natscluster")
+
+	// Owns(NACK Account) is safe to register unconditionally — the
+	// controller-runtime informer tolerates missing CRDs by logging and
+	// retrying. Keeping it in the watch list means a NACK install after
+	// the operator is already running wakes up the reconciler without
+	// a restart.
+	b = b.Owns(&jsv1beta2.Account{})
+
+	return b.Complete(r)
 }

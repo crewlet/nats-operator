@@ -357,6 +357,18 @@ func buildVolumes(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSp
 	addTLS("mqtt", spec.Config.MQTT.TLS)
 	addTLS("gateway", spec.Config.Gateway.TLS)
 
+	// Operator-managed auth Secret — mounted at /etc/nats-auth when JWT
+	// auth is configured. Contains the rendered auth.conf, operator JWT,
+	// and resolver_preload fragment.
+	if spec.Auth.JWT != nil {
+		vols = append(vols, corev1.Volume{
+			Name: volumeNameAuth,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: authSecretName(cr)},
+			},
+		})
+	}
+
 	// Global CA bundle (one Secret or ConfigMap projection).
 	if spec.TLSCA.Secret != nil {
 		vols = append(vols, corev1.Volume{
@@ -421,10 +433,17 @@ func natsContainerMounts(spec *natsv1alpha1.NatsClusterSpec) []corev1.VolumeMoun
 			MountPath: mountPathData,
 		})
 	}
-	if spec.Config.Resolver.Enabled && resolverUsesPVC(spec) {
+	if jwtResolverUsesPVC(spec) {
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      pvcVolumeNameResolver,
 			MountPath: mountPathResolver,
+		})
+	}
+	if spec.Auth.JWT != nil {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      volumeNameAuth,
+			MountPath: mountPathAuth,
+			ReadOnly:  true,
 		})
 	}
 	return mounts
@@ -435,8 +454,13 @@ func buildVolumeClaimTemplates(spec *natsv1alpha1.NatsClusterSpec) []corev1.Pers
 	if spec.Config.JetStream.Enabled && jetstreamUsesPVC(spec) {
 		pvcs = append(pvcs, pvcTemplate(pvcVolumeNameJetStream, spec.Config.JetStream.FileStore.PVC))
 	}
-	if spec.Config.Resolver.Enabled && resolverUsesPVC(spec) {
-		pvcs = append(pvcs, pvcTemplate(pvcVolumeNameResolver, spec.Config.Resolver.PVC))
+	if jwtResolverUsesPVC(spec) {
+		// auth.jwt.resolver.type=full stores accounts on disk; the PVC
+		// template comes from auth.jwt.resolver.storage.
+		pvcs = append(pvcs, corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: pvcVolumeNameResolver},
+			Spec:       *spec.Auth.JWT.Resolver.Storage,
+		})
 	}
 	return pvcs
 }
@@ -452,8 +476,13 @@ func jetstreamUsesPVC(spec *natsv1alpha1.NatsClusterSpec) bool {
 	return spec.Config.JetStream.FileStore.PVC.Enabled == nil || *spec.Config.JetStream.FileStore.PVC.Enabled
 }
 
-func resolverUsesPVC(spec *natsv1alpha1.NatsClusterSpec) bool {
-	return spec.Config.Resolver.PVC.Enabled == nil || *spec.Config.Resolver.PVC.Enabled
+// jwtResolverUsesPVC returns true when the JWT auth path is enabled with
+// resolver.type=full, which requires on-disk storage for the dynamic
+// account JWT store.
+func jwtResolverUsesPVC(spec *natsv1alpha1.NatsClusterSpec) bool {
+	return spec.Auth.JWT != nil &&
+		spec.Auth.JWT.Resolver.Type == natsv1alpha1.JWTResolverFull &&
+		spec.Auth.JWT.Resolver.Storage != nil
 }
 
 // ----- helpers -----

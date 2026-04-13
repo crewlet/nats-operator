@@ -9,17 +9,22 @@ escape hatches in the API surface.
 
 ## What it manages
 
-The operator owns three custom resources:
+The operator owns two custom resources:
 
 | Kind | Group | What it does |
 |---|---|---|
-| `NatsCluster` | `nats.crewlet.cloud/v1alpha1` | A clustered NATS server deployment — StatefulSet, Services, ConfigMap, PDB, optional reloader / prom-exporter sidecars, optional websocket Ingress, JetStream / leaf-nodes / mqtt / gateway / monitor / profiling listeners. |
+| `NatsCluster` | `nats.crewlet.cloud/v1alpha1` | A clustered NATS server deployment — StatefulSet, Services, ConfigMap, PDB, optional reloader / prom-exporter sidecars, optional websocket Ingress, JetStream / leaf-nodes / mqtt / gateway / monitor / profiling listeners, and typed decentralized JWT authentication. |
 | `NatsBox` | `nats.crewlet.cloud/v1alpha1` | A long-running utility pod with the `nats` CLI and pre-configured contexts (URLs + creds + TLS). Useful for `kubectl exec` debugging. |
 
 JetStream resource management (Streams, Consumers, KV, Object Store) is
-delegated to [NACK](https://github.com/nats-io/nack) — install it alongside
-the operator and write NACK CRs that target your `NatsCluster` via the URL
-the operator publishes in `Status.Endpoints`.
+delegated to [NACK](https://github.com/nats-io/nack). The operator
+**auto-wires NACK's `Account` CRD** from each account declared in
+`spec.auth.jwt.accounts[]` that has a `userCreds` reference set, so NACK
+Stream / Consumer / KV / ObjectStore CRs only need to reference
+`account: <natscluster-name>-<account.name>` — no URLs, no credentials
+repeated per resource. If NACK isn't installed the operator degrades
+gracefully and surfaces a `NackIntegrationAvailable=False` status
+condition; the integration lights up automatically when NACK arrives.
 
 ## Quick start
 
@@ -96,47 +101,111 @@ The operator generates a `default` nats CLI context pointing at the
 referenced cluster's headless Service. To add more contexts (e.g. for a
 remote NATS), set `spec.contexts`.
 
-## API design
+## Authentication (decentralized JWT) + NACK auto-wiring
 
-`NatsCluster` is a typed mirror of the upstream helm chart's
-[`values.yaml`](https://github.com/nats-io/k8s/blob/main/helm/charts/nats/values.yaml),
-with three deliberate departures:
+The operator supports NATS decentralized auth as a typed surface under
+`spec.auth.jwt`. You generate an operator, accounts, and user credentials
+out-of-band with [`nsc`](https://docs.nats.io/using-nats/nats-tools/nsc),
+drop the resulting JWTs and creds files into Kubernetes Secrets, and
+reference them from the cluster spec. The operator renders the
+`operator:` / `system_account:` / `resolver:` / `resolver_preload:`
+directives into `nats.conf` automatically and — if `userCreds` is set on
+an account — also creates a NACK `Account` CR pointing at the cluster so
+NACK-managed JetStream resources can use the account by name.
 
-1. **No `merge` / `patch` escape hatches.** Every field is typed. The chart
-   uses raw YAML overlays to compensate for helm's limited templating —
-   the operator owns rendering, so we can model new K8s fields properly
-   when users need them. The one exception is `Config.Includes`, a typed
-   list of `SecretKeySelector` / `ConfigMapKeySelector` references that
-   the operator mounts and pulls into `nats.conf` via the native `include`
-   directive. That covers JWT operator/account/user setups, custom
-   resolvers, and any free-form NATS config that doesn't yet have a typed
-   field.
+```yaml
+apiVersion: nats.crewlet.cloud/v1alpha1
+kind: NatsCluster
+metadata:
+  name: my-nats
+spec:
+  replicas: 3
+  image: {repository: nats, tag: 2.12.6-alpine}
+  config:
+    jetstream:
+      enabled: true
+      fileStore:
+        pvc:
+          resources: {requests: {storage: 10Gi}}
+  auth:
+    jwt:
+      # The operator JWT — root of trust. Generated with `nsc` and
+      # stored in a Secret the user manages.
+      operator:
+        name: nats-operator-jwt
+        key: operator.jwt
 
-2. **Single source of truth for derived state.** The chart exposes
-   listener ports in three places (`config.<listener>.port`,
-   `container.ports.<listener>`, `service.ports.<listener>`) and lets
-   users set them inconsistently. Here, the listener port lives only in
-   `config.<listener>.port`; container ports and service ports are
-   derived. Replicas live at `spec.replicas` (a workload concern), not
-   buried inside `config.cluster.replicas`. Cluster routing is enabled
-   automatically when `replicas > 1` — there is no separate
-   `cluster.enabled` toggle.
+      # Public key of the account with cluster-admin privileges.
+      # Must match one of the accounts[] entries below.
+      systemAccount: AASYSTEM_ACCOUNT_PUBKEY
 
-3. **CEL validation rules** catch common misconfigurations at admission
-   time:
-   - `reloader.enabled || podTemplate.configChecksumAnnotation` — at
-     least one config-rollout strategy must be in effect, otherwise the
-     operator literally cannot apply config changes.
-   - `monitor.tlsEnabled` requires `monitor.enabled`.
-   - `memoryStore.enabled` requires `maxSize`.
-   - `webSocketIngress.enabled` requires non-empty `hosts`.
-   - `pdb.minAvailable` and `pdb.maxUnavailable` are mutually exclusive.
-   - `promExporter.podMonitor.enabled` requires `promExporter.enabled`.
-   - `tlsCA.configMap` and `tlsCA.secret` are mutually exclusive.
-   - `configInclude.secret` xor `configInclude.configMap`.
+      accounts:
+        - name: system
+          publicKey: AASYSTEM_ACCOUNT_PUBKEY
+          jwt:
+            name: nats-system-account-jwt
+            key: account.jwt
+          # When set, the operator creates a NACK `Account` CR named
+          # "my-nats-system" pointing at this creds secret, so NACK CRs
+          # can reference `account: my-nats-system`.
+          userCreds:
+            name: nats-system-user-creds
+            key: nats.creds
 
-The result: the typical user spec is dramatically smaller than the helm
-chart equivalent, but every helm chart capability is preserved.
+        - name: app
+          publicKey: BBAPP_ACCOUNT_PUBKEY
+          jwt:
+            name: nats-app-account-jwt
+            key: account.jwt
+          userCreds:
+            name: nats-app-user-creds
+            key: nats.creds
+
+      resolver:
+        # "memory" serves only the preloaded accounts above (static —
+        # additions require a spec edit). "full" uses on-disk storage
+        # and lets the system account push new accounts at runtime.
+        type: memory
+```
+
+With this in place, a NACK stream is a three-line CR — no URLs, no
+credential repetition, cluster lifecycle propagates via owner references:
+
+```yaml
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: orders
+spec:
+  account: my-nats-app     # auto-created by the operator from auth.jwt.accounts[1]
+  name: ORDERS
+  subjects: [orders.*]
+```
+
+**What the operator does behind the scenes:**
+
+1. Reads the operator JWT and each account JWT from the user's Secrets.
+2. Builds an operator-managed `my-nats-auth` Secret containing
+   `operator.jwt` (copied byte-for-byte), `resolver_preload.conf` (the
+   `resolver_preload { ... }` block with account JWTs inlined), and
+   `auth.conf` (the top-level fragment).
+3. Mounts that Secret at `/etc/nats-auth/` in the nats container and
+   emits `include "/etc/nats-auth/auth.conf";` in the rendered
+   `nats.conf`. The JWT material never lands in a ConfigMap.
+4. For each account with `userCreds`, SSA-applies a NACK
+   `jetstream.nats.io/v1beta2 Account` CR named
+   `<cluster>-<account.name>` with `servers` filled from the cluster's
+   `Status.Endpoints.Client` and `creds` pointing at the user-supplied
+   Secret. Owner-referenced back to the NatsCluster so deletion cascades.
+5. JWT rotation: update your account JWT Secret → next reconcile
+   rebuilds the managed auth Secret → the reloader sidecar detects the
+   mount change and signals nats-server. No pod restart for
+   hot-reloadable changes.
+
+**When NACK isn't installed:** the NatsCluster itself is unaffected. The
+operator sets `NackIntegrationAvailable=False` with a clear reason and
+requeues every 60 seconds. As soon as NACK is installed the condition
+flips to `True` and the Account CRs get created on the next reconcile.
 
 ## Multi-tenancy
 
@@ -160,45 +229,6 @@ interfere:
 - All managed resources carry an owner reference back to the
   `NatsCluster`, so deleting the CR cascades cleanly without GC of
   resources owned by other clusters.
-
-## Reconcile model
-
-The operator uses [server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/)
-with `FieldManager: "nats-operator"`. Every reconcile:
-
-1. Fetches the CR
-2. Applies controller-side defaults (image versions, port numbers,
-   defaulting `enabled: true` on optional blocks)
-3. Renders `nats.conf` once and shares the bytes between the ConfigMap
-   builder and the StatefulSet builder (so the optional checksum
-   annotation matches the file the pod actually mounts)
-4. Builds every owned resource from the defaulted spec
-5. SSAs each with `client.ForceOwnership` so we own only the fields we
-   set — user-supplied annotations, labels, and unrelated fields are
-   preserved across reconciles
-6. Patches `Status.Replicas` / `Status.ReadyReplicas` /
-   `Status.Endpoints` / `Status.Conditions` from the live StatefulSet
-
-Config changes propagate via the reloader sidecar by default (hot reload,
-no pod restart). Users can opt into rolling restarts on every change
-instead with `podTemplate.configChecksumAnnotation: true`. A CEL rule
-rejects specs that disable both, since the operator would otherwise be
-unable to apply config changes.
-
-## Status
-
-| | Status |
-|---|---|
-| `NatsCluster` API | ✅ v1alpha1 |
-| `NatsCluster` controller | ✅ v1alpha1 (StatefulSet, Service, ConfigMap, PDB, ServiceAccount, PodMonitor, websocket Ingress) |
-| `NatsBox` API | ✅ v1alpha1 |
-| `NatsBox` controller | ✅ v1alpha1 (Deployment, contexts Secret) |
-| Helm chart | ✅ |
-| nats.conf renderer golden tests | ✅ |
-| Envtest controller integration tests | ⚠️ scaffold only |
-| End-to-end tests on a real cluster | ⏳ planned |
-| JWT auth typed surface | ⏳ today via `Config.Resolver` + `Config.Includes`; typed convenience fields planned |
-| NACK wrapper CRDs (NatsStream, etc.) | ❌ deferred — use NACK CRs directly with `Status.Endpoints.Client` |
 
 ## Development
 
@@ -227,31 +257,6 @@ make helm-package
 
 The operator is built with [kubebuilder](https://book.kubebuilder.io/) and
 uses [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime).
-Source layout:
-
-```
-api/v1alpha1/             CRD types (NatsCluster, NatsBox)
-internal/controller/
-  natscluster_controller.go    Reconcile loop for NatsCluster
-  natsbox_controller.go        Reconcile loop for NatsBox
-  defaults.go                  Controller-side defaulting
-  labels.go                    Canonical labels and selector helpers
-  naming.go                    Resource naming + mount path constants
-  natsconf.go                  nats.conf renderer + HOCON-flavored serializer
-  natsconf_test.go             Golden tests for the renderer
-  build_*.go                   Pure builders for each managed K8s resource
-  natsbox_*.go                 NatsBox-specific helpers and builders
-config/                   Kubebuilder kustomize manifests (CRDs, RBAC, samples)
-charts/nats-operator/     Helm chart (CRDs and manager-role auto-synced from config/)
-```
-
-The `nats.conf` renderer is a custom HOCON-flavored serializer rather
-than `encoding/json`, because nats-server's `include` directive isn't
-expressible as JSON. The renderer builds a `map[string]any` structurally
-and emits keys deterministically (sorted, with includes always last) so
-the same spec produces byte-identical output across reconciles —
-critical because the rendered file lands in a ConfigMap and unstable
-rendering would force needless rolling restarts.
 
 ## Contributing
 

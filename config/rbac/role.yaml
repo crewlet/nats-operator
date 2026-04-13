@@ -33,6 +33,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - jetstream.nats.io
+  resources:
+  - accounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - monitoring.coreos.com
   resources:
   - podmonitors
