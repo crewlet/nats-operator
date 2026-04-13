@@ -47,10 +47,10 @@ server_name: $SERVER_NAME
   name: "test"
   no_advertise: true
   port: 6222
-  routes [
-    "nats://test-0.test-headless.default.svc:6222"
-    "nats://test-1.test-headless.default.svc:6222"
-    "nats://test-2.test-headless.default.svc:6222"
+  routes = [
+    "nats://test-0.test-headless.default.svc.cluster.local:6222"
+    "nats://test-1.test-headless.default.svc.cluster.local:6222"
+    "nats://test-2.test-headless.default.svc.cluster.local:6222"
   ]
 }
 http_port: 8222
@@ -146,9 +146,9 @@ include "/etc/nats-extra/limits.conf"
   name: "test"
   no_advertise: true
   port: 6222
-  routes [
-    "nats://$NATS_ROUTES_USER:$NATS_ROUTES_PASSWORD@test-0.test-headless.default.svc:6222"
-    "nats://$NATS_ROUTES_USER:$NATS_ROUTES_PASSWORD@test-1.test-headless.default.svc:6222"
+  routes = [
+    "nats://$NATS_ROUTES_USER:$NATS_ROUTES_PASSWORD@test-0.test-headless.default.svc.cluster.local:6222"
+    "nats://$NATS_ROUTES_USER:$NATS_ROUTES_PASSWORD@test-1.test-headless.default.svc.cluster.local:6222"
   ]
 }
 http_port: 8222

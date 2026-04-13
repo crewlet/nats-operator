@@ -149,9 +149,26 @@ rbac:
   # -- Whether to create the operator's ClusterRole / RoleBindings.
   create: true
 
+# -- Controls whether the operator watches + reconciles NACK (jetstream.nats.io)
+# Account CRs when a NatsCluster declares auth.jwt.accounts[].userCreds. One of:
+#   - "auto"     — the operator probes the API server at startup and enables
+#                  the integration if NACK's CRDs are installed. Safe default:
+#                  keeps the operator logs clean on clusters without NACK, and
+#                  transparently enables the integration when NACK is present.
+#   - "enabled"  — force the integration on. The operator will register the
+#                  NACK Account watch even if the CRDs are missing, which
+#                  floods the log with "no matches for kind" errors until
+#                  NACK is installed. Use only if you are installing NACK
+#                  immediately after the operator.
+#   - "disabled" — force the integration off. The operator never touches the
+#                  NACK API group — useful when you have no intention of
+#                  running NACK and want the quietest possible operator logs.
+nackIntegration: auto
+
 # -- Manager command-line arguments. The chart appends --leader-elect,
-# --health-probe-bind-address and --metrics-bind-address based on the values
-# above; entries here are appended verbatim and override duplicates.
+# --health-probe-bind-address, --metrics-bind-address and --nack-integration
+# based on the values above; entries here are appended verbatim and override
+# duplicates.
 extraArgs: []
 
 # -- Optional PodDisruptionBudget for the operator pod itself.

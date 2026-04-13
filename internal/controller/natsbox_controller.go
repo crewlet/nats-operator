@@ -58,6 +58,9 @@ func (r *NatsBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		return ctrl.Result{}, err
 	}
+	// Snapshot for the final MergeFrom patch; see the NatsCluster
+	// reconciler for the rationale.
+	beforeStatus := cr.DeepCopy()
 
 	spec := defaultedNatsBox(&cr.Spec)
 
@@ -82,14 +85,14 @@ func (r *NatsBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	if err := r.updateStatus(ctx, cr, &spec); err != nil {
+	if err := r.updateStatus(ctx, cr, beforeStatus, &spec); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
 }
 
-func (r *NatsBoxReconciler) updateStatus(ctx context.Context, cr *natsv1alpha1.NatsBox, spec *natsv1alpha1.NatsBoxSpec) error {
+func (r *NatsBoxReconciler) updateStatus(ctx context.Context, cr *natsv1alpha1.NatsBox, before *natsv1alpha1.NatsBox, spec *natsv1alpha1.NatsBoxSpec) error {
 	dep := &appsv1.Deployment{}
 	depKey := client.ObjectKey{Namespace: cr.Namespace, Name: natsBoxDeploymentName(cr)}
 	if err := r.Get(ctx, depKey, dep); err != nil && !apierrors.IsNotFound(err) {
@@ -106,7 +109,7 @@ func (r *NatsBoxReconciler) updateStatus(ctx context.Context, cr *natsv1alpha1.N
 	cr.Status.ReadyReplicas = dep.Status.ReadyReplicas
 	setNatsBoxConditions(cr, dep, desired)
 
-	return r.Status().Update(ctx, cr)
+	return r.Status().Patch(ctx, cr, client.MergeFrom(before))
 }
 
 func setNatsBoxConditions(cr *natsv1alpha1.NatsBox, dep *appsv1.Deployment, desired int32) {

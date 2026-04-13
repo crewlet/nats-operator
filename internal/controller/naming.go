@@ -133,14 +133,11 @@ func includeMountPath(name string) string {
 }
 
 // podFQDN returns the predictable per-pod DNS name used in cluster route
-// URLs and JetStream server names.
-func podFQDN(cr *natsv1alpha1.NatsCluster, ordinal int32, useFQDN bool, clusterDomain string) string {
-	short := fmt.Sprintf("%s-%d.%s.%s.svc",
-		statefulSetName(cr), ordinal, headlessServiceName(cr), cr.Namespace)
-	if useFQDN {
-		return short + "." + clusterDomain
-	}
-	return short
+// URLs and JetStream server names. Always fully qualified — see the
+// clusterRoutes comment in natsconf.go for the rationale.
+func podFQDN(cr *natsv1alpha1.NatsCluster, ordinal int32, clusterDomain string) string {
+	return fmt.Sprintf("%s-%d.%s.%s.svc.%s",
+		statefulSetName(cr), ordinal, headlessServiceName(cr), cr.Namespace, clusterDomain)
 }
 
 // clusterEndpoints returns the canonical connection URLs the operator

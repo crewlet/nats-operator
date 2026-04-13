@@ -50,6 +50,22 @@ const (
 	defaultClusterDomain = "cluster.local"
 )
 
+// defaultJWTResolverPVC fills in ReadWriteOnce on the auth.jwt.resolver
+// storage template when type=full. Same single-writer reasoning as the
+// JetStream file store: one pod per volume, RWO is always correct.
+func defaultJWTResolverPVC(spec *natsv1alpha1.NatsClusterSpec) {
+	if spec.Auth.JWT == nil {
+		return
+	}
+	if spec.Auth.JWT.Resolver.Type != natsv1alpha1.JWTResolverFull {
+		return
+	}
+	if spec.Auth.JWT.Resolver.Storage == nil {
+		return
+	}
+	defaultPVCSpec(spec.Auth.JWT.Resolver.Storage)
+}
+
 // defaulted returns a copy of spec with controller-side defaults applied.
 // Reconcile and the resource builders work on the defaulted copy so they do
 // not need to repeat nil checks or fallback expressions everywhere. The
@@ -93,6 +109,9 @@ func defaulted(in *natsv1alpha1.NatsClusterSpec) natsv1alpha1.NatsClusterSpec {
 		out.PodDisruptionBudget.Enabled = ptr(true)
 	}
 
+	// JWT auth resolver PVC (same accessModes default as JetStream).
+	defaultJWTResolverPVC(out)
+
 	return *out
 }
 
@@ -132,6 +151,23 @@ func defaultConfig(c *natsv1alpha1.NatsConfigSpec) {
 	// Profiling.
 	if c.Profiling.Enabled && c.Profiling.Port == 0 {
 		c.Profiling.Port = defaultProfilingPort
+	}
+
+	// JetStream file store PVC — default accessModes to ReadWriteOnce.
+	// Every nats-server JetStream store is written by exactly one pod
+	// (the owner of the volume), so RWO is always correct; nothing
+	// useful ever wants a shared-write store. Users can still override
+	// for niche cases (read-only volumes, e.g.).
+	defaultPVCSpec(&c.JetStream.FileStore.PVC.PersistentVolumeClaimSpec)
+}
+
+// defaultPVCSpec fills in the fields K8s requires on a PVC but that users
+// shouldn't have to spell out every time.
+func defaultPVCSpec(pvc *corev1.PersistentVolumeClaimSpec) {
+	if len(pvc.AccessModes) == 0 {
+		pvc.AccessModes = []corev1.PersistentVolumeAccessMode{
+			corev1.ReadWriteOnce,
+		}
 	}
 }
 

@@ -19,15 +19,19 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -68,6 +72,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var nackIntegration string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -86,6 +91,12 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&nackIntegration, "nack-integration", "auto",
+		"Controls the NACK (jetstream.nats.io) integration: "+
+			"'auto' detects whether NACK's CRDs are installed at startup; "+
+			"'enabled' forces the integration on (watches and NACK Account CR creation); "+
+			"'disabled' forces it off (no Owns watch, no reconcile path). "+
+			"Use 'disabled' in clusters that do not run NACK to keep the operator logs clean.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -185,9 +196,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	nackEnabled, nackErr := resolveNackIntegration(nackIntegration, mgr.GetConfig())
+	if nackErr != nil {
+		setupLog.Error(nackErr, "Failed to resolve --nack-integration mode")
+		os.Exit(1)
+	}
+	if nackEnabled {
+		setupLog.Info("NACK integration enabled — watching jetstream.nats.io/v1beta2 Account")
+	} else {
+		setupLog.Info("NACK integration disabled — Account CRs will not be reconciled or watched")
+	}
+
 	if err := (&controller.NatsClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                mgr.GetClient(),
+		Scheme:                mgr.GetScheme(),
+		EnableNackIntegration: nackEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NatsCluster")
 		os.Exit(1)
@@ -215,4 +238,50 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// resolveNackIntegration turns the --nack-integration flag value into a
+// boolean enable/disable decision. In "auto" mode it queries the API
+// server's discovery endpoint for jetstream.nats.io/v1beta2 and enables
+// the integration when NACK's Account CRD is present.
+func resolveNackIntegration(mode string, cfg *rest.Config) (bool, error) {
+	switch mode {
+	case "enabled":
+		return true, nil
+	case "disabled":
+		return false, nil
+	case "auto":
+		// Fall through to the discovery probe below.
+	default:
+		return false, fmt.Errorf("invalid --nack-integration=%q: must be one of auto, enabled, disabled", mode)
+	}
+
+	// Build a discovery client from the same rest config the manager uses.
+	// We deliberately do not reach into the manager's already-initialized
+	// cache — the cache isn't started yet at this point in main().
+	dc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		return false, fmt.Errorf("building discovery client for NACK probe: %w", err)
+	}
+	resources, err := dc.ServerResourcesForGroupVersion(jsv1beta2.SchemeGroupVersion.String())
+	if err != nil {
+		// Group not registered at all → NACK isn't installed. Any other
+		// discovery error is non-fatal: we default to "off" and log it.
+		if apierrors.IsNotFound(err) || discovery.IsGroupDiscoveryFailedError(err) {
+			setupLog.Info("NACK CRD not discovered, integration will start disabled",
+				"group", jsv1beta2.SchemeGroupVersion.String())
+			return false, nil
+		}
+		setupLog.Info("discovery probe for NACK failed, integration will start disabled",
+			"error", err.Error())
+		return false, nil
+	}
+	for _, r := range resources.APIResources {
+		if r.Kind == "Account" {
+			return true, nil
+		}
+	}
+	setupLog.Info("NACK group is served but Account kind is missing, integration will start disabled",
+		"group", jsv1beta2.SchemeGroupVersion.String())
+	return false, nil
 }

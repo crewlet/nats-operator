@@ -53,8 +53,9 @@ spec:
   image:
     repository: nats
     tag: 2.12.6-alpine
-  resources:
-    requests: {cpu: 500m, memory: 2Gi}
+  container:
+    resources:
+      requests: {cpu: 500m, memory: 2Gi}
   config:
     jetstream:
       enabled: true

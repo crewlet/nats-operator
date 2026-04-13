@@ -92,7 +92,8 @@ Image reference. Honors digest first, then tag, then chart appVersion.
 
 {{/*
 Manager command-line arguments. The chart computes leader-election,
-health-probe and metrics flags from values, then appends extraArgs.
+health-probe, metrics and nack-integration flags from values, then
+appends extraArgs.
 */}}
 {{- define "nats-operator.args" -}}
 {{- $args := list -}}
@@ -107,6 +108,13 @@ health-probe and metrics flags from values, then appends extraArgs.
 {{- if not .Values.metrics.secure -}}
 {{- $args = append $args "--metrics-secure=false" -}}
 {{- end -}}
+{{- end -}}
+{{- if .Values.nackIntegration -}}
+{{- $mode := .Values.nackIntegration -}}
+{{- if not (has $mode (list "auto" "enabled" "disabled")) -}}
+{{- fail (printf "nackIntegration must be one of auto, enabled, disabled; got %q" $mode) -}}
+{{- end -}}
+{{- $args = append $args (printf "--nack-integration=%s" $mode) -}}
 {{- end -}}
 {{- range .Values.extraArgs -}}
 {{- $args = append $args . -}}

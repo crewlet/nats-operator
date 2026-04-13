@@ -64,7 +64,7 @@ func buildStatefulSet(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClust
 				},
 				Spec: buildPodSpec(cr, spec),
 			},
-			VolumeClaimTemplates: buildVolumeClaimTemplates(spec),
+			VolumeClaimTemplates: buildVolumeClaimTemplates(cr, spec),
 		},
 	}
 }
@@ -123,14 +123,32 @@ func buildNatsContainer(spec *natsv1alpha1.NatsClusterSpec, mounts []corev1.Volu
 		StartupProbe:    spec.Container.StartupProbe,
 	}
 	// Apply default health probes only when the user hasn't supplied their own.
+	//
+	// Liveness uses js-enabled-only — the lightest /healthz variant that
+	// just confirms the server process is responding and JetStream is
+	// enabled. Crucially, it does NOT depend on cluster meta leadership,
+	// so a transient loss of quorum won't cause kubelet to restart every
+	// pod and turn a blip into an outage.
+	//
+	// Readiness uses js-server-only — checks that JetStream is running on
+	// THIS pod. Slightly stricter than liveness so we stop routing traffic
+	// to a pod whose JetStream subsystem has died, but still doesn't gate
+	// on cluster-wide state.
+	//
+	// Startup uses js-enabled-only with a generous failureThreshold. Full
+	// bootstrap (routes established → meta leader elected) can take 10–30s
+	// on a cold boot, and some of that time is spent on DNS propagation
+	// that we have no control over. A 5s*30 = 150s grace window makes the
+	// container robust to that startup tail without letting genuinely
+	// broken pods hang forever.
 	if c.LivenessProbe == nil {
-		c.LivenessProbe = defaultHealthProbe(spec, "/healthz", 30)
+		c.LivenessProbe = defaultHealthProbe(spec, "/healthz?js-enabled-only=true", 30, 3)
 	}
 	if c.ReadinessProbe == nil {
-		c.ReadinessProbe = defaultHealthProbe(spec, "/healthz?js-server-only=true", 5)
+		c.ReadinessProbe = defaultHealthProbe(spec, "/healthz?js-server-only=true", 5, 3)
 	}
 	if c.StartupProbe == nil {
-		c.StartupProbe = defaultHealthProbe(spec, "/healthz", 5)
+		c.StartupProbe = defaultHealthProbe(spec, "/healthz?js-enabled-only=true", 5, 30)
 	}
 	return c
 }
@@ -266,7 +284,7 @@ func natsContainerEnv(spec *natsv1alpha1.NatsClusterSpec) []corev1.EnvVar {
 	return env
 }
 
-func defaultHealthProbe(spec *natsv1alpha1.NatsClusterSpec, path string, period int32) *corev1.Probe {
+func defaultHealthProbe(spec *natsv1alpha1.NatsClusterSpec, path string, period, failureThreshold int32) *corev1.Probe {
 	if !isTrue(spec.Config.Monitor.Enabled) {
 		// Fall back to TCP probe on the client port when the monitor is off.
 		return &corev1.Probe{
@@ -275,7 +293,8 @@ func defaultHealthProbe(spec *natsv1alpha1.NatsClusterSpec, path string, period 
 					Port: intstr.FromInt32(spec.Config.Nats.Port),
 				},
 			},
-			PeriodSeconds: period,
+			PeriodSeconds:    period,
+			FailureThreshold: failureThreshold,
 		}
 	}
 	scheme := corev1.URISchemeHTTP
@@ -290,7 +309,8 @@ func defaultHealthProbe(spec *natsv1alpha1.NatsClusterSpec, path string, period 
 				Scheme: scheme,
 			},
 		},
-		PeriodSeconds: period,
+		PeriodSeconds:    period,
+		FailureThreshold: failureThreshold,
 	}
 }
 
@@ -449,26 +469,41 @@ func natsContainerMounts(spec *natsv1alpha1.NatsClusterSpec) []corev1.VolumeMoun
 	return mounts
 }
 
-func buildVolumeClaimTemplates(spec *natsv1alpha1.NatsClusterSpec) []corev1.PersistentVolumeClaim {
+func buildVolumeClaimTemplates(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec) []corev1.PersistentVolumeClaim {
 	var pvcs []corev1.PersistentVolumeClaim
 	if spec.Config.JetStream.Enabled && jetstreamUsesPVC(spec) {
-		pvcs = append(pvcs, pvcTemplate(pvcVolumeNameJetStream, spec.Config.JetStream.FileStore.PVC))
+		pvcs = append(pvcs, pvcTemplate(cr, pvcVolumeNameJetStream, spec.Config.JetStream.FileStore.PVC))
 	}
 	if jwtResolverUsesPVC(spec) {
 		// auth.jwt.resolver.type=full stores accounts on disk; the PVC
-		// template comes from auth.jwt.resolver.storage.
+		// template comes from auth.jwt.resolver.storage. Same labeling
+		// rationale as the JetStream template — managed-by label so
+		// cleanup selectors find these volumes.
 		pvcs = append(pvcs, corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: pvcVolumeNameResolver},
-			Spec:       *spec.Auth.JWT.Resolver.Storage,
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   pvcVolumeNameResolver,
+				Labels: commonLabels(cr),
+			},
+			Spec: *spec.Auth.JWT.Resolver.Storage,
 		})
 	}
 	return pvcs
 }
 
-func pvcTemplate(name string, pvc natsv1alpha1.PVCConfig) corev1.PersistentVolumeClaim {
+func pvcTemplate(cr *natsv1alpha1.NatsCluster, name string, pvc natsv1alpha1.PVCConfig) corev1.PersistentVolumeClaim {
+	// Set the canonical labels on the PVC template so the PVCs the
+	// StatefulSet creates from it carry our managed-by label. Kubernetes
+	// doesn't auto-populate labels on volumeClaimTemplates, and without
+	// them any cleanup relying on `-l app.kubernetes.io/managed-by=...`
+	// misses the jetstream data volumes — which causes stale JetStream
+	// metadata to survive across NatsCluster recreations and prevents
+	// the fresh cluster from electing a meta leader.
 	return corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       pvc.PersistentVolumeClaimSpec,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: commonLabels(cr),
+		},
+		Spec: pvc.PersistentVolumeClaimSpec,
 	}
 }
 

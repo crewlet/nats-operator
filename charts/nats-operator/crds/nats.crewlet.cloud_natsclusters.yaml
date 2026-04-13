@@ -463,8 +463,11 @@ spec:
                         minimum: 1
                         type: integer
                       routeURLs:
-                        description: RouteURLsConfig controls how the cluster route
-                          URLs are constructed.
+                        description: |-
+                          RouteURLsConfig controls how the cluster route URLs are constructed.
+                          Route hosts are always emitted as fully-qualified
+                          `<pod>.<headless>.<ns>.svc.<cluster-domain>` names to keep resolution
+                          deterministic across glibc / musl / Go-net resolvers.
                         properties:
                           authSecretRef:
                             description: |-
@@ -486,13 +489,11 @@ spec:
                           k8sClusterDomain:
                             default: cluster.local
                             description: |-
-                              k8sClusterDomain overrides the cluster DNS suffix used when building
-                              FQDN route URLs. Defaults to cluster.local.
+                              k8sClusterDomain overrides the cluster DNS suffix appended to every
+                              route URL. Defaults to cluster.local, which covers every stock
+                              Kubernetes install — only change it when the cluster was brought up
+                              with a custom --cluster-domain.
                             type: string
-                          useFQDN:
-                            description: useFQDN switches route URLs to fully-qualified
-                              pod DNS names.
-                            type: boolean
                         type: object
                       tls:
                         description: |-

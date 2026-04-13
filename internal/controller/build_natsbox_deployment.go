@@ -92,12 +92,32 @@ func buildNatsBoxContainer(spec *natsv1alpha1.NatsBoxSpec, mounts []corev1.Volum
 // Secret across all contexts. We deduplicate by Secret name so two contexts
 // pointing at the same Secret don't double-mount.
 func buildNatsBoxVolumes(cr *natsv1alpha1.NatsBox, contexts map[string]natsv1alpha1.NatsBoxContext, names []string) []corev1.Volume {
+	// Project the contexts Secret into the layout the nats CLI expects:
+	//
+	//   $XDG_CONFIG_HOME/nats/context.txt         ← default context name
+	//   $XDG_CONFIG_HOME/nats/context/<name>.json ← per-context definitions
+	//
+	// Secret data keys can't contain "/", so we store them flat
+	// (context.txt, <name>.json) and use Items.Path to place them
+	// under the right subdirectory when the Secret is mounted. The
+	// Volume is then mounted at natsBoxNatsDir — one level UP from
+	// the `context` subdir so context.txt lands at the right place.
+	contextItems := make([]corev1.KeyToPath, 0, 1+len(names))
+	contextItems = append(contextItems, corev1.KeyToPath{Key: "context.txt", Path: "context.txt"})
+	for _, name := range names {
+		contextItems = append(contextItems, corev1.KeyToPath{
+			Key:  name + ".json",
+			Path: "context/" + name + ".json",
+		})
+	}
+
 	vols := []corev1.Volume{
 		{
 			Name: natsBoxContextsVol,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: natsBoxContextsSecretName(cr),
+					Items:      contextItems,
 				},
 			},
 		},
@@ -177,10 +197,14 @@ func buildNatsBoxVolumes(cr *natsv1alpha1.NatsBox, contexts map[string]natsv1alp
 }
 
 func buildNatsBoxMounts(contexts map[string]natsv1alpha1.NatsBoxContext, names []string) []corev1.VolumeMount {
+	// Mount the contexts Secret at $XDG_CONFIG_HOME/nats (natsBoxNatsDir).
+	// The volume's Items.Path projections (see buildNatsBoxVolumes) place
+	// context.txt at the mount root and each <name>.json under the
+	// `context/` subdirectory — matching the nats CLI's native layout.
 	mounts := []corev1.VolumeMount{
 		{
 			Name:      natsBoxContextsVol,
-			MountPath: natsBoxContextsDir,
+			MountPath: natsBoxNatsDir,
 			ReadOnly:  true,
 		},
 	}

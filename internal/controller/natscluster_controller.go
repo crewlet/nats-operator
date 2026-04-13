@@ -48,6 +48,15 @@ const fieldManager = "nats-operator"
 type NatsClusterReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// EnableNackIntegration controls whether the reconciler creates NACK
+	// `jetstream.nats.io/v1beta2` Account CRs for auth.jwt.accounts[]
+	// entries with userCreds set, and whether SetupWithManager registers
+	// an Owns watch on NACK Account. When false, the integration is fully
+	// skipped — the condition is not stamped, the watch is not registered,
+	// and the operator does not touch the NACK API group at all. Resolved
+	// from the --nack-integration flag in main.go (auto / enabled / disabled).
+	EnableNackIntegration bool
 }
 
 // +kubebuilder:rbac:groups=nats.crewlet.cloud,resources=natsclusters,verbs=get;list;watch;create;update;patch;delete
@@ -75,6 +84,13 @@ func (r *NatsClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, err
 	}
+	// Snapshot the CR before any mutation so the final status patch can
+	// compute a minimal merge patch that captures every change made
+	// during this reconcile (NACK conditions + replica counts + endpoints).
+	// This also means the patch does not require a matching
+	// resourceVersion, so unrelated concurrent updates to the CR do not
+	// race our status write.
+	beforeStatus := cr.DeepCopy()
 
 	spec := defaulted(&cr.Spec)
 
@@ -142,7 +158,7 @@ func (r *NatsClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nackErr
 	}
 
-	if err := r.updateStatus(ctx, cr, &spec); err != nil {
+	if err := r.updateStatus(ctx, cr, beforeStatus, &spec); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -200,6 +216,13 @@ func (r *NatsClusterReconciler) readSecretKey(ctx context.Context, namespace str
 func (r *NatsClusterReconciler) applyNackAccounts(ctx context.Context, cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec, log interface {
 	Info(msg string, keysAndValues ...any)
 }) (time.Duration, error) {
+	// Fast exit when the integration is turned off at the operator level.
+	// No condition is stamped — "disabled by flag" is not a failure to
+	// surface, it's a deliberate config choice.
+	if !r.EnableNackIntegration {
+		return 0, nil
+	}
+
 	accounts := buildNackAccounts(cr, spec)
 	if len(accounts) == 0 {
 		// No NACK integration requested — clear any stale condition.
@@ -248,7 +271,16 @@ func (r *NatsClusterReconciler) setNackCondition(cr *natsv1alpha1.NatsCluster, s
 // updateStatus reads the live StatefulSet and patches the NatsCluster's
 // status subresource with current replica counts and the standard
 // Available / Progressing / Degraded conditions.
-func (r *NatsClusterReconciler) updateStatus(ctx context.Context, cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec) error {
+//
+// Uses MergeFrom patch semantics rather than Update so we don't race
+// against the `resourceVersion` — the CR can be bumped between our Get
+// at the top of Reconcile and this status write (Owns events, user
+// edits, SSA side-effects) without us needing a refetch-and-retry loop.
+// The `before` snapshot must be taken at the top of Reconcile, before
+// any mutation to cr.Status, so the computed merge patch captures every
+// change made during the whole reconcile pass (including NACK
+// conditions stamped by applyNackAccounts).
+func (r *NatsClusterReconciler) updateStatus(ctx context.Context, cr *natsv1alpha1.NatsCluster, before *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec) error {
 	sts := &appsv1.StatefulSet{}
 	stsKey := client.ObjectKey{Namespace: cr.Namespace, Name: statefulSetName(cr)}
 	if err := r.Get(ctx, stsKey, sts); err != nil && !apierrors.IsNotFound(err) {
@@ -267,7 +299,7 @@ func (r *NatsClusterReconciler) updateStatus(ctx context.Context, cr *natsv1alph
 	cr.Status.Endpoints = clusterEndpoints(cr, spec)
 	setConditions(cr, sts, desired)
 
-	return r.Status().Update(ctx, cr)
+	return r.Status().Patch(ctx, cr, client.MergeFrom(before))
 }
 
 // setConditions stamps the Available / Progressing / Degraded conditions on
@@ -332,9 +364,14 @@ func upsertCondition(in []metav1.Condition, c metav1.Condition) []metav1.Conditi
 // owned resource types so changes to them trigger reconciles for the
 // parent NatsCluster. PodMonitor is intentionally not in the Owns list —
 // the operator owns it via SSA but doesn't need to react to its events.
-// NACK Account ownership is installed conditionally at runtime: if the
-// CRD isn't present when the manager starts, Owns() would panic, so
-// integration is gated by runtime checks in applyNackAccounts instead.
+//
+// The NACK Account ownership is only registered when EnableNackIntegration
+// is true. controller-runtime's informer does NOT tolerate missing CRDs
+// gracefully: a missing kind floods the operator logs with
+// "no matches for kind" errors on every polling interval. The
+// --nack-integration flag in main.go auto-detects the CRD at startup (or
+// lets the user force the mode), and the reconciler only calls Owns()
+// here when the integration is actually supposed to run.
 func (r *NatsClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&natsv1alpha1.NatsCluster{}).
@@ -347,12 +384,9 @@ func (r *NatsClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.Ingress{}).
 		Named("natscluster")
 
-	// Owns(NACK Account) is safe to register unconditionally — the
-	// controller-runtime informer tolerates missing CRDs by logging and
-	// retrying. Keeping it in the watch list means a NACK install after
-	// the operator is already running wakes up the reconciler without
-	// a restart.
-	b = b.Owns(&jsv1beta2.Account{})
+	if r.EnableNackIntegration {
+		b = b.Owns(&jsv1beta2.Account{})
+	}
 
 	return b.Complete(r)
 }

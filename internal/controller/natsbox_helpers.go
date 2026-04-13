@@ -29,10 +29,23 @@ const (
 )
 
 // Mount paths inside the nats-box container. The chart sets
-// XDG_CONFIG_HOME=/etc/nats-config and the nats CLI then reads its
-// contexts from $XDG_CONFIG_HOME/nats/context/*.json.
+// XDG_CONFIG_HOME=/etc/nats-config and the nats CLI then reads:
+//   - $XDG_CONFIG_HOME/nats/context.txt      — default context name
+//   - $XDG_CONFIG_HOME/nats/context/*.json   — context definitions
+//
+// We mount the operator-managed contexts Secret at natsBoxNatsDir
+// ($XDG_CONFIG_HOME/nats) and use volume item path projections to
+// place context.txt at the mount root and each <name>.json under a
+// `context/` subdirectory. Mounting the Secret at natsBoxContextsDir
+// (one level deeper) would place context.txt at
+// /etc/nats-config/nats/context/context.txt, which the CLI does not
+// look at — so the default context name would be invisible and the
+// CLI would fall back to an unconfigured default, producing
+// `nats: no servers available for connection` regardless of what is
+// in default.json.
 const (
 	natsBoxConfigHome   = "/etc/nats-config"
+	natsBoxNatsDir      = "/etc/nats-config/nats"
 	natsBoxContextsDir  = "/etc/nats-config/nats/context"
 	natsBoxContextPtr   = "/etc/nats-config/nats/context.txt"
 	natsBoxCredsDirRoot = "/etc/nats-creds"
@@ -129,8 +142,29 @@ func natsBoxResolvedContexts(spec *natsv1alpha1.NatsBoxSpec) map[string]natsv1al
 }
 
 // natsBoxContextURL returns the nats:// URL for a context. When the user
-// has not provided one, falls back to the headless Service of the NatsCluster
-// referenced by clusterRef.
+// has not provided one, falls back to the client-facing Service of the
+// NatsCluster referenced by clusterRef.
+//
+// We target the CLIENT service (`<cluster>`) not the headless service
+// (`<cluster>-headless`) for two reasons:
+//
+//  1. It is the correct pattern — the headless service exists for stable
+//     per-pod DNS and cluster routing between NATS servers; clients
+//     should use the ClusterIP service which load-balances to ready pods.
+//  2. The nats.go client library resolves the hostname to the set of
+//     backend IPs and does not always fail over cleanly when one of them
+//     is mid-handshake. Using the stable ClusterIP indirection sidesteps
+//     that race entirely: the client talks to the ClusterIP, kube-proxy
+//     routes to a ready pod, the connection completes. Empirically,
+//     connecting directly to the headless name from nats-box produces
+//     `nats: no servers available for connection` even though raw TCP
+//     and the NATS INFO handshake both succeed against every underlying
+//     pod.
+//
+// The URL is fully qualified (`<svc>.<ns>.svc.<cluster-domain>`) rather
+// than relying on resolv.conf search-path expansion — the Alpine-based
+// nats-box image uses musl's DNS resolver, which handles partial names
+// inconsistently.
 func natsBoxContextURL(cr *natsv1alpha1.NatsBox, ctx natsv1alpha1.NatsBoxContext) string {
 	if ctx.URL != "" {
 		return ctx.URL
@@ -138,8 +172,6 @@ func natsBoxContextURL(cr *natsv1alpha1.NatsBox, ctx natsv1alpha1.NatsBoxContext
 	if cr.Spec.ClusterRef == nil {
 		return ""
 	}
-	// Construct the URL from the headless Service the NatsCluster operator
-	// creates: <cluster-name>-headless.<ns>.svc:4222
-	return fmt.Sprintf("nats://%s-headless.%s.svc:%d",
-		cr.Spec.ClusterRef.Name, cr.Namespace, defaultNatsPort)
+	return fmt.Sprintf("nats://%s.%s.svc.%s:%d",
+		cr.Spec.ClusterRef.Name, cr.Namespace, defaultClusterDomain, defaultNatsPort)
 }

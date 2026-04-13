@@ -225,17 +225,19 @@ type ClusterConfig struct {
 }
 
 // RouteURLsConfig controls how the cluster route URLs are constructed.
+// Route hosts are always emitted as fully-qualified
+// `<pod>.<headless>.<ns>.svc.<cluster-domain>` names to keep resolution
+// deterministic across glibc / musl / Go-net resolvers.
 type RouteURLsConfig struct {
 	// authSecretRef references a Secret holding the cluster route user/password.
 	// The Secret must contain `user` and `password` keys. When set, the operator
 	// adds the credentials to route URLs and the cluster authorization block.
 	// +optional
 	AuthSecretRef *corev1.LocalObjectReference `json:"authSecretRef,omitempty"`
-	// useFQDN switches route URLs to fully-qualified pod DNS names.
-	// +optional
-	UseFQDN bool `json:"useFQDN,omitempty"`
-	// k8sClusterDomain overrides the cluster DNS suffix used when building
-	// FQDN route URLs. Defaults to cluster.local.
+	// k8sClusterDomain overrides the cluster DNS suffix appended to every
+	// route URL. Defaults to cluster.local, which covers every stock
+	// Kubernetes install — only change it when the cluster was brought up
+	// with a custom --cluster-domain.
 	// +kubebuilder:default=cluster.local
 	// +optional
 	K8sClusterDomain string `json:"k8sClusterDomain,omitempty"`

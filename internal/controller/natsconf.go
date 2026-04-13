@@ -194,12 +194,19 @@ func renderCluster(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterS
 // clusterRoutes builds the typed list of route URLs the operator stamps into
 // the cluster block. Routes use the headless Service DNS so each pod can
 // resolve its peers without leaking through the client Service.
+//
+// The host form is always the fully-qualified
+// `<pod>.<headless>.<ns>.svc.<cluster-domain>` — shorter forms work
+// inconsistently across resolvers (musl libc and Go's net resolver
+// disagree on search-path expansion for names with 2+ dots), which
+// previously caused transient "no such host" errors on cold cluster
+// boot. Emitting FQDN is safe on every resolver and sidesteps a whole
+// class of DNS startup races.
 func clusterRoutes(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec) []any {
 	if spec.Replicas == nil {
 		return nil
 	}
 	port := spec.Config.Cluster.Port
-	useFQDN := spec.Config.Cluster.RouteURLs.UseFQDN
 	domain := spec.Config.Cluster.RouteURLs.K8sClusterDomain
 	withAuth := spec.Config.Cluster.RouteURLs.AuthSecretRef != nil
 
@@ -210,7 +217,7 @@ func clusterRoutes(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterS
 
 	routes := make([]any, 0, *spec.Replicas)
 	for i := int32(0); i < *spec.Replicas; i++ {
-		host := podFQDN(cr, i, useFQDN, domain)
+		host := podFQDN(cr, i, domain)
 		var url string
 		if withAuth {
 			url = fmt.Sprintf("%s://%s:%s@%s:%d",
@@ -291,8 +298,19 @@ func renderBlockBody(buf *bytes.Buffer, b confBlock, indent int) {
 			indentWrite(buf, indent)
 			buf.WriteString("}\n")
 		case []any:
+			// `key = [ ... ]` — the separator matters. nats-server's
+			// HOCON parser accepts `key {` for nested objects (standard
+			// HOCON shorthand) but is NOT permissive about `key [ ... ]`
+			// without an assignment operator for arrays — the bare form
+			// parses silently as a path-concatenation expression and
+			// leaves the list empty at runtime, which is exactly how we
+			// lost our cluster routes and spent an afternoon chasing
+			// ghosts. We use `=` rather than `:` to match the examples
+			// shipped in the nats-server source tree (e.g.
+			// server/configs/srv_a.conf), which is the most reliable
+			// signal of what the parser actually accepts cleanly.
 			indentWrite(buf, indent)
-			fmt.Fprintf(buf, "%s [\n", k)
+			fmt.Fprintf(buf, "%s = [\n", k)
 			for _, item := range x {
 				indentWrite(buf, indent+1)
 				renderScalar(buf, item)
