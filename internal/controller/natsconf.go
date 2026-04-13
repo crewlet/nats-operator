@@ -210,7 +210,7 @@ func clusterRoutes(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterS
 	domain := spec.Config.Cluster.RouteURLs.K8sClusterDomain
 	withAuth := spec.Config.Cluster.RouteURLs.AuthSecretRef != nil
 
-	scheme := "nats"
+	scheme := appNameValue
 	if spec.Config.Cluster.TLS.Enabled {
 		scheme = "tls"
 	}

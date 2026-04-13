@@ -13,11 +13,14 @@ package controller
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	natsv1alpha1 "github.com/crewlet/nats-operator/api/v1alpha1"
 )
+
+const testNatsTLSSecretName = "nats-tls"
 
 // TestRenderNatsConf is a set of golden tests pinning the renderer's output
 // for representative spec shapes. The expected strings are inlined so a
@@ -75,7 +78,7 @@ server_name: $SERVER_NAME
 			name: "client TLS with CA",
 			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
 				spec.Config.Nats.TLS.Enabled = true
-				spec.Config.Nats.TLS.SecretName = "nats-tls"
+				spec.Config.Nats.TLS.SecretName = testNatsTLSSecretName
 				spec.Config.Nats.TLS.Cert = defaultTLSCertFile
 				spec.Config.Nats.TLS.Key = defaultTLSKeyFile
 				spec.TLSCA.Secret = &corev1.SecretKeySelector{
@@ -160,13 +163,136 @@ server_name: $SERVER_NAME
 			name: "monitor TLS uses https_port",
 			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
 				spec.Config.Nats.TLS.Enabled = true
-				spec.Config.Nats.TLS.SecretName = "nats-tls"
+				spec.Config.Nats.TLS.SecretName = testNatsTLSSecretName
 				spec.Config.Monitor.TLSEnabled = true
 			},
 			want: `https_port: 8222
 port: 4222
 server_name: $SERVER_NAME
 tls {
+  cert_file: "/etc/nats-certs/nats/tls.crt"
+  key_file: "/etc/nats-certs/nats/tls.key"
+}
+`,
+		},
+		{
+			name: "mqtt and gateway listeners render with correct ports and TLS",
+			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
+				spec.Config.MQTT.Enabled = true
+				spec.Config.Gateway.Enabled = true
+				spec.Config.Gateway.TLS.Enabled = true
+				spec.Config.Gateway.TLS.SecretName = "gateway-tls"
+			},
+			want: `gateway {
+  name: "test"
+  port: 7222
+  tls {
+    cert_file: "/etc/nats-certs/gateway/tls.crt"
+    key_file: "/etc/nats-certs/gateway/tls.key"
+  }
+}
+http_port: 8222
+mqtt {
+  port: 1883
+}
+port: 4222
+server_name: $SERVER_NAME
+`,
+		},
+		{
+			name: "leafnodes with TLS emits per-listener tls block",
+			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
+				spec.Config.LeafNodes.Enabled = true
+				spec.Config.LeafNodes.TLS.Enabled = true
+				spec.Config.LeafNodes.TLS.SecretName = "leafnode-tls"
+			},
+			want: `http_port: 8222
+leafnodes {
+  port: 7422
+  tls {
+    cert_file: "/etc/nats-certs/leafnodes/tls.crt"
+    key_file: "/etc/nats-certs/leafnodes/tls.key"
+  }
+}
+port: 4222
+server_name: $SERVER_NAME
+`,
+		},
+		{
+			name: "profiling listener emits prof_port",
+			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
+				spec.Config.Profiling.Enabled = true
+			},
+			want: `http_port: 8222
+port: 4222
+prof_port: 65432
+server_name: $SERVER_NAME
+`,
+		},
+		{
+			name: "auth.jwt emits the /etc/nats-auth include",
+			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
+				spec.Auth.JWT = &natsv1alpha1.JWTAuthSpec{
+					Operator:      corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "op"}, Key: "operator.jwt"},
+					SystemAccount: "AASYS",
+					Accounts: []natsv1alpha1.JWTAccount{
+						{Name: "sys", PublicKey: "AASYS", JWT: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "sys-jwt"}, Key: "account.jwt"}},
+					},
+				}
+			},
+			want: `http_port: 8222
+port: 4222
+server_name: $SERVER_NAME
+include "/etc/nats-auth/auth.conf"
+`,
+		},
+		{
+			name: "auth include comes before config.includes in the output",
+			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
+				spec.Auth.JWT = &natsv1alpha1.JWTAuthSpec{
+					Operator:      corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "op"}, Key: "operator.jwt"},
+					SystemAccount: "AASYS",
+					Accounts: []natsv1alpha1.JWTAccount{
+						{Name: "sys", PublicKey: "AASYS"},
+					},
+				}
+				spec.Config.Includes = []natsv1alpha1.ConfigInclude{
+					{Name: "limits.conf", Secret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "l"}}},
+				}
+			},
+			want: `http_port: 8222
+port: 4222
+server_name: $SERVER_NAME
+include "/etc/nats-auth/auth.conf"
+include "/etc/nats-extra/limits.conf"
+`,
+		},
+		{
+			name: "tlsCA adds ca_file to each listener TLS block",
+			mut: func(spec *natsv1alpha1.NatsClusterSpec) {
+				spec.Config.Nats.TLS.Enabled = true
+				spec.Config.Nats.TLS.SecretName = testNatsTLSSecretName
+				spec.Config.LeafNodes.Enabled = true
+				spec.Config.LeafNodes.TLS.Enabled = true
+				spec.Config.LeafNodes.TLS.SecretName = "leaf-tls"
+				spec.TLSCA.Secret = &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "nats-ca"},
+					Key:                  "ca.crt",
+				}
+			},
+			want: `http_port: 8222
+leafnodes {
+  port: 7422
+  tls {
+    ca_file: "/etc/nats-ca-cert/ca.crt"
+    cert_file: "/etc/nats-certs/leafnodes/tls.crt"
+    key_file: "/etc/nats-certs/leafnodes/tls.key"
+  }
+}
+port: 4222
+server_name: $SERVER_NAME
+tls {
+  ca_file: "/etc/nats-ca-cert/ca.crt"
   cert_file: "/etc/nats-certs/nats/tls.crt"
   key_file: "/etc/nats-certs/nats/tls.key"
 }
@@ -187,9 +313,7 @@ tls {
 			spec := defaulted(&cr.Spec)
 
 			got := renderNatsConf(cr, &spec)
-			if string(got) != tt.want {
-				t.Errorf("rendered config mismatch.\n--- got ---\n%s\n--- want ---\n%s", string(got), tt.want)
-			}
+			assert.Equal(t, tt.want, string(got), "rendered config mismatch")
 		})
 	}
 }

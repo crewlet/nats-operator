@@ -145,7 +145,7 @@ func podFQDN(cr *natsv1alpha1.NatsCluster, ordinal int32, clusterDomain string) 
 // clients consume these instead of guessing the Service name pattern.
 func clusterEndpoints(cr *natsv1alpha1.NatsCluster, spec *natsv1alpha1.NatsClusterSpec) natsv1alpha1.NatsClusterEndpoints {
 	port := spec.Config.Nats.Port
-	scheme := "nats"
+	scheme := appNameValue
 	if spec.Config.Nats.TLS.Enabled {
 		scheme = "tls"
 	}
