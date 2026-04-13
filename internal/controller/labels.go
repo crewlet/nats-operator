@@ -21,11 +21,10 @@ import (
 // label is what every Service / PDB / PodMonitor / StatefulSet selects on, so
 // changing it across versions would orphan resources.
 const (
-	labelAppName      = "app.kubernetes.io/name"
-	labelAppInstance  = "app.kubernetes.io/instance"
-	labelAppManaged   = "app.kubernetes.io/managed-by"
-	labelAppPartOf    = "app.kubernetes.io/part-of"
-	labelAppComponent = "app.kubernetes.io/component"
+	labelAppName     = "app.kubernetes.io/name"
+	labelAppInstance = "app.kubernetes.io/instance"
+	labelAppManaged  = "app.kubernetes.io/managed-by"
+	labelAppPartOf   = "app.kubernetes.io/part-of"
 
 	// labelSelectorKey is the canonical selector key used by every selector
 	// belonging to a NatsCluster. Two NatsClusters in the same namespace get
