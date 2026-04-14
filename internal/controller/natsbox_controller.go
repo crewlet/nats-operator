@@ -79,8 +79,7 @@ func (r *NatsBoxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err := controllerutil.SetControllerReference(cr, obj, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
 		}
-		//nolint:staticcheck // SA1019 — see NatsClusterReconciler for migration note.
-		if err := r.Patch(ctx, obj, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+		if err := applySSA(ctx, r.Client, obj); err != nil {
 			return ctrl.Result{}, fmt.Errorf("server-side applying %T %s: %w", obj, obj.GetName(), err)
 		}
 	}
