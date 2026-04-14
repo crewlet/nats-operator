@@ -2,7 +2,7 @@ apiVersion: v2
 name: nats-operator
 description: A Helm chart for deploying the NATS Operator on Kubernetes
 type: application
-version: 0.1.0
+version: 0.1.1
 appVersion: "v0.1.0"
 home: https://github.com/crewlet/nats-operator
 sources:
