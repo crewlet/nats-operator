@@ -1,0 +1,19 @@
+version: 2
+
+project_name: nats-operator
+
+# Skip building binaries
+builds:
+  - skip: true
+
+# Skip creating archives since we're not building binaries
+archives:
+  - formats: [ 'binary' ]
+
+# Skip checksums since we have no binaries
+checksum:
+  disable: true
+
+# Use GitHub's native changelog generation
+changelog:
+  use: github-native
