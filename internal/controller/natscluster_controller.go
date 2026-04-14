@@ -139,11 +139,7 @@ func (r *NatsClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := controllerutil.SetControllerReference(cr, obj, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("setting owner reference on %T %s: %w", obj, obj.GetName(), err)
 		}
-		// Migrating to client.Client.Apply() requires generated ApplyConfigurations
-		// for every type we own (corev1, appsv1, our v1alpha1, ...). Out of scope
-		// for v1alpha1 — staying on the patch-based SSA path until then.
-		//nolint:staticcheck // SA1019
-		if err := r.Patch(ctx, obj, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+		if err := applySSA(ctx, r.Client, obj); err != nil {
 			return ctrl.Result{}, fmt.Errorf("server-side applying %T %s: %w", obj, obj.GetName(), err)
 		}
 	}
@@ -234,8 +230,7 @@ func (r *NatsClusterReconciler) applyNackAccounts(ctx context.Context, cr *natsv
 		if err := controllerutil.SetControllerReference(cr, account, r.Scheme); err != nil {
 			return 0, fmt.Errorf("setting owner reference on NACK Account %s: %w", account.Name, err)
 		}
-		//nolint:staticcheck // SA1019 — see note on client.Apply above.
-		if err := r.Patch(ctx, account, client.Apply, client.ForceOwnership, client.FieldOwner(fieldManager)); err != nil {
+		if err := applySSA(ctx, r.Client, account); err != nil {
 			if meta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
 				// NACK CRD not installed. Surface a condition and retry
 				// later — the operator will pick up the integration once
