@@ -5,8 +5,12 @@ A Helm chart for the [nats-operator](https://github.com/crewlet/nats-operator) â
 ## TL;DR
 
 ```bash
-helm install nats-operator oci://ghcr.io/crewlet/nats-operator --version 0.1.0
+helm install nats-operator \
+  oci://ghcr.io/crewlet/nats-operator/charts/nats-operator
 ```
+
+Pin a specific chart version with `--version <x.y.z>`. The operator image
+published alongside the chart lives at `ghcr.io/crewlet/nats-operator`.
 
 Or from source:
 
