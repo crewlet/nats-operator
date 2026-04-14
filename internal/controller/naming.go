@@ -22,8 +22,6 @@ import (
 const (
 	suffixConfig   = "-config"
 	suffixHeadless = "-headless"
-	suffixReloader = "-reloader"
-	suffixExporter = "-exporter"
 	suffixPDB      = "-pdb"
 	suffixSA       = "-sa"
 	suffixPodMon   = "-podmonitor"
@@ -62,7 +60,6 @@ const (
 // Volume names used by the StatefulSet pod template.
 const (
 	volumeNameConfig = "config"
-	volumeNameExtra  = "extra-config"
 	volumeNameCA     = "ca-cert"
 	volumeNameAuth   = "auth"
 )

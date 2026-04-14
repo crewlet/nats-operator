@@ -36,7 +36,7 @@ const (
 // We mount the operator-managed contexts Secret at natsBoxNatsDir
 // ($XDG_CONFIG_HOME/nats) and use volume item path projections to
 // place context.txt at the mount root and each <name>.json under a
-// `context/` subdirectory. Mounting the Secret at natsBoxContextsDir
+// `context/` subdirectory. Mounting the Secret at natsBoxNatsDir
 // (one level deeper) would place context.txt at
 // /etc/nats-config/nats/context/context.txt, which the CLI does not
 // look at — so the default context name would be invisible and the
@@ -46,8 +46,6 @@ const (
 const (
 	natsBoxConfigHome   = "/etc/nats-config"
 	natsBoxNatsDir      = "/etc/nats-config/nats"
-	natsBoxContextsDir  = "/etc/nats-config/nats/context"
-	natsBoxContextPtr   = "/etc/nats-config/nats/context.txt"
 	natsBoxCredsDirRoot = "/etc/nats-creds"
 	natsBoxNKeysDirRoot = "/etc/nats-nkeys"
 	natsBoxCertsDirRoot = "/etc/nats-certs"
