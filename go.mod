@@ -1,6 +1,6 @@
 module github.com/crewlet/nats-operator
 
-go 1.25.3
+go 1.25.7
 
 require (
 	github.com/nats-io/nack v0.22.4
