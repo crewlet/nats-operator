@@ -3,7 +3,7 @@ module github.com/crewlet/nats-operator
 go 1.25.3
 
 require (
-	github.com/nats-io/nack v0.22.4
+	github.com/nats-io/nack v0.23.0
 	github.com/onsi/ginkgo/v2 v2.28.3
 	github.com/onsi/gomega v1.40.0
 	github.com/stretchr/testify v1.11.1
